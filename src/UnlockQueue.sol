@@ -36,8 +36,21 @@ library UnlockQueue {
     struct Data {
         uint256 head; // oldest element
         uint256 tail; // newest element
-        uint256 length; // number of elements
         mapping(uint256 index => Node) nodes; // elements as a map
+    }
+
+    /**
+     * @notice returns the oldest element in the queue
+     */
+    function head(UnlockQueue.Data storage q) internal view returns (Item memory) {
+        return q.nodes[q.head].data;
+    }
+
+    /**
+     * @notice returns the newest element in the queue
+     */
+    function tail(UnlockQueue.Data storage q) internal view returns (Item memory) {
+        return q.nodes[q.tail].data;
     }
 
     /**
@@ -57,10 +70,6 @@ library UnlockQueue {
         } else {
             q.head = next;
             q.nodes[next].prev = 0;
-        }
-
-        unchecked {
-            --q.length;
         }
 
         delete q.nodes[head];
@@ -83,10 +92,6 @@ library UnlockQueue {
         } else {
             q.tail = prev;
             q.nodes[prev].next = 0;
-        }
-
-        unchecked {
-            --q.length;
         }
 
         delete q.nodes[tail];
@@ -112,9 +117,5 @@ library UnlockQueue {
         }
 
         q.tail = newTail;
-
-        unchecked {
-            ++q.length;
-        }
     }
 }

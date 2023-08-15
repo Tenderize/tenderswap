@@ -78,8 +78,8 @@ contract TenderSwapTest is Test {
         assertEq(swap.lpToken().balanceOf(addr1), deposit1, "addr1 lpToken balance");
         assertEq(swap.lpToken().balanceOf(addr2), deposit2, "addr2 lpToken balance");
         assertEq(underlying.balanceOf(address(swap)), deposit1 + deposit2, "TenderSwap underlying balance");
-        assertEq(swap.liquidity(), deposit1 + deposit2, "TenderSwap liquidity");
-        assertEq(swap.availableLiquidity(), deposit1 + deposit2, "TenderSwap available liquidity");
+        assertEq(swap.liabilities(), deposit1 + deposit2, "TenderSwap liquidity");
+        assertEq(swap.liquidity(), deposit1 + deposit2, "TenderSwap available liquidity");
         assertTrue(swap.utilisation().eq(ZERO), "TenderSwap utilisation");
         assertTrue(swap.utilisationFee().eq(BASE_FEE), "TenderSwap utilisation fee");
     }
@@ -108,7 +108,7 @@ contract TenderSwapTest is Test {
 
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
-        assertEq(swap.availableLiquidity(), 90 ether, "TenderSwap available liquidity");
+        assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
     }
 
     function testFuzz_swap(uint256 liquidity, uint256 amount) public {
@@ -131,6 +131,6 @@ contract TenderSwapTest is Test {
 
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
-        assertEq(swap.availableLiquidity(), liquidity - amount, "TenderSwap available liquidity");
+        assertEq(swap.liquidity(), liquidity - amount, "TenderSwap available liquidity");
     }
 }

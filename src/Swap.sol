@@ -107,38 +107,63 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         _;
     }
 
-    function liquidity() public view returns (uint256) {
+    /**
+     * @notice Amount of liabilities outstanding to liquidity providers.
+     * Liabilities represent all the deposits from liquidity providers and their earned fees.
+     */
+    function liabilities() public view returns (uint256) {
         Data storage $ = _loadStorageSlot();
         return $.liabilities;
     }
 
-    function availableLiquidity() public view returns (uint256) {
+    /**
+     * @notice Amount of available liquidity (cash on hand).
+     */
+    function liquidity() public view returns (uint256) {
         Data storage $ = _loadStorageSlot();
         return $.liabilities - $.unlocking;
     }
 
+    /**
+     * @notice Current general utilisation ratio of the pool's liquidity
+     * @dev `utilisation = unlocking / liabilities`
+     */
     function utilisation() public view returns (UD60x18 r) {
         Data storage $ = _loadStorageSlot();
         if ($.liabilities == 0) return ZERO;
         r = _utilisation($.unlocking, $.liabilities);
     }
 
+    /**
+     * @notice Current general utilisation fee given the current utilisation ratio
+     * @dev `utilisationFee = utilisation^n`
+     */
     function utilisationFee() public view returns (UD60x18 f) {
         f = _utilisationFee(utilisation());
     }
 
+    /**
+     * @notice Current spread multiplier for an asset that can be exchanged.
+     * The spread is based on the individual utilisation ratio of the asset and its supply vs other assets
+     */
     function spread(address asset) public view returns (UD60x18 s) {
         return _spread(asset, 0);
     }
 
-    function deposit(uint256 amount) external {
+    /**
+     * @notice Deposit liquidity into the pool, receive liquidity pool shares in return.
+     * The liquidity pool shares represent an amount of liabilities owed to the liquidity provider.
+     * @param amount Amount of liquidity to deposit
+     * @return lpShares Amount of liquidity pool shares minted
+     */
+    function deposit(uint256 amount) external returns (uint256 lpShares) {
         Data storage $ = _loadStorageSlot();
 
         // Transfer tokens to the pool
         underlying.safeTransferFrom(msg.sender, address(this), amount);
 
         // Calculate LP tokens to mint
-        uint256 lpShares = _calculateLpShares(amount);
+        lpShares = _calculateLpShares(amount);
 
         // Update liabilities
         $.liabilities += amount;
@@ -149,10 +174,17 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         emit Deposit(msg.sender, amount, lpShares);
     }
 
+    /**
+     * @notice Withdraw liquidity from the pool, burn liquidity pool shares.
+     * If not enough liquidity is available, the transaction will revert.
+     * In this case the liquidity provider has to wait until pending unlocks are processed,
+     * and the liquidity becomes available again to withdraw.
+     * @param amount Amount of liquidity to withdraw
+     */
     function withdraw(uint256 amount) external {
         Data storage $ = _loadStorageSlot();
 
-        uint256 available = availableLiquidity();
+        uint256 available = liquidity();
 
         if (amount > available) revert InsufficientAssets(amount, available);
 
@@ -171,6 +203,10 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         emit Withdraw(msg.sender, amount, lpShares);
     }
 
+    /**
+     * @notice Claim outstanding rewards for a relayer.
+     * @return relayerReward Amount of tokens claimed
+     */
     function claimRelayerRewards() public returns (uint256 relayerReward) {
         Data storage $ = _loadStorageSlot();
 
@@ -183,6 +219,14 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         emit RelayerRewardsClaimed(msg.sender, relayerReward);
     }
 
+    /**
+     * @notice Quote the amount of tokens that would be received for a given amount of input tokens.
+     * @dev This function wraps `swap` in `staticcall` and is therefore not very gas efficient to be used on-chain.
+     * @param asset Address of the input token
+     * @param amount Amount of input tokens
+     * @return out Amount of output tokens
+     * @return fee Amount of fees paid
+     */
     function quote(address asset, uint256 amount) public view returns (uint256 out, uint256 fee) {
         (bool success, bytes memory returnData) =
             address(this).staticcall(abi.encodeWithSelector(this.swap.selector, asset, amount));
@@ -191,6 +235,16 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         }
     }
 
+    /**
+     * @notice Swap an amount of input tokens for an amount of output tokens.
+     * @dev This function reverts if expected output amount is smaller than the required minimum output amount
+     * specified by the caller. This allows slippage protection.
+     * @param asset Address of the input token
+     * @param amount Amount of input tokens
+     * @param minOut Minimum amount of output tokens to receive
+     * @return out Amount of output tokens
+     * @return fee Amount of fees paid
+     */
     function swap(
         address asset,
         uint256 amount,
@@ -231,7 +285,16 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         emit Swap(msg.sender, asset, amount, out);
     }
 
-    function buyUnlock() external {
+    /**
+     * @notice Purchase the earliest pending unlock NFT. The caller will receive the NFT,
+     *  which represents an amount of tokens that unlock at maturity. The caller will also
+     * receive a reward for purchasing the NFT, which decays as time to maturity decreases.
+     * @dev Unlocks NFTs are held in a special dequeue, which is ordered by maturity.
+     * The earliest pending unlock is always at the back of the queue. The queue must be traversed
+     * from back to front to purchase unlocks.
+     * @return tokenId The ID of the purchased unlock NFT
+     */
+    function buyUnlock() external returns (uint256 tokenId) {
         Data storage $ = _loadStorageSlot();
 
         // Can not purchase unlocks in recovery mode
@@ -253,7 +316,8 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         // - Update liabilities to distribute LP rewards
         $.liabilities += unlock.fee - reward;
 
-        (address tenderizer,) = _decodeTokenId(unlock.id);
+        tokenId = unlock.id;
+        (address tenderizer,) = _decodeTokenId(tokenId);
         uint256 ufa = $.unlockingForAsset[tenderizer] - unlock.amount;
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
@@ -267,11 +331,17 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         underlying.safeTransferFrom(msg.sender, address(this), unlock.amount - reward);
 
         // transfer unlock to caller
-        ERC721(unlocks).safeTransferFrom(address(this), msg.sender, unlock.id);
+        ERC721(unlocks).safeTransferFrom(address(this), msg.sender, tokenId);
 
-        emit UnlockBought(msg.sender, unlock.id, unlock.amount, reward, unlock.fee - reward);
+        emit UnlockBought(msg.sender, tokenId, unlock.amount, reward, unlock.fee - reward);
     }
 
+    /**
+     * @notice Redeem an unlock NFT at maturity on behalf of the pool. The pool receives the tokens from the unlock.
+     * The caller receives a small portion of the fee that was paid during the swap that created the unlock.
+     * @dev The oldest unlocks are at the front of the queue. The queue must be traversed from front to back to redeem
+     * unlocks that have reached maturity.
+     */
     function redeemUnlock() external {
         Data storage $ = _loadStorageSlot();
 
@@ -359,6 +429,9 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         }
     }
 
+    /**
+     * @notice checks if an asset is a valid tenderizer for `underlying`
+     */
     function _isValidAsset(address asset) internal view returns (bool) {
         return Registry(registry).isTenderizer(asset) && Tenderizer(asset).asset() == address(underlying);
     }
@@ -395,13 +468,17 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
             key,
             UnlockQueue.Item({
                 id: key,
-                amount: SafeCastLib.safeCastTo128(amount + fee),
+                amount: SafeCastLib.safeCastTo128(amount),
                 fee: SafeCastLib.safeCastTo128(fee),
                 maturity: maturity
             })
         );
     }
 
+    /**
+     * @notice Since the LSTs to be exchanged are aTokens, and thus have a rebasing supply,
+     * we need to update the supplies upon a swap to correctly determine the spread of the asset.
+     */
     function _supplyUpdateHook(address tenderizer) internal {
         Data storage $ = _loadStorageSlot();
 
@@ -417,6 +494,9 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         $.lastSupplyForAsset[tenderizer] = newSupply;
     }
 
+    /**
+     * @notice Calculates the amount of LP tokens represented by a given amount of liabilities
+     */
     function _calculateLpShares(uint256 amount) internal view returns (uint256) {
         Data storage $ = _loadStorageSlot();
 

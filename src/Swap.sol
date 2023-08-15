@@ -354,7 +354,9 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         fee = f.mul(ud(amount)).unwrap();
 
         // get the output amount
-        out = amount - fee;
+        unchecked {
+            out = amount - fee;
+        }
     }
 
     function _isValidAsset(address asset) internal view returns (bool) {

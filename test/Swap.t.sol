@@ -11,7 +11,7 @@
 
 pragma solidity >=0.8.19;
 
-import { Test, stdError, console } from "forge-std/Test.sol";
+import { Test } from "forge-std/Test.sol";
 import { MockERC20 } from "test/helpers/MockERC20.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
@@ -19,7 +19,7 @@ import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer
 import { TenderSwap, Config, BASE_FEE, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
-import { UD60x18, ud, ZERO, UNIT } from "@prb/math/UD60x18.sol";
+import { UD60x18, ud, unwrap, ZERO, UNIT } from "@prb/math/UD60x18.sol";
 
 contract TenderSwapTest is Test {
     MockERC20 underlying;
@@ -109,5 +109,28 @@ contract TenderSwapTest is Test {
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
         assertEq(swap.availableLiquidity(), 90 ether, "TenderSwap available liquidity");
+    }
+
+    function testFuzz_swap(uint256 liquidity, uint256 amount) public {
+        liquidity = bound(liquidity, 1e18, type(uint64).max);
+        amount = bound(amount, 1e9, liquidity);
+
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity);
+
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+
+        tToken0.mint(address(this), liquidity);
+        tToken0.approve(address(swap), amount);
+        (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
+
+        uint256 expFee = unwrap(ud(amount).mul((BASE_FEE + ud(amount).div(ud(liquidity)).pow(ud(3e18)))));
+        expFee = expFee >= amount ? amount : expFee;
+
+        assertEq(fee, expFee, "swap fee");
+        assertEq(out, amount - expFee, "swap out");
+        assertEq(swap.availableLiquidity(), liquidity - amount, "TenderSwap available liquidity");
     }
 }

@@ -1,2 +1,10 @@
 @prb/test/=lib/prb-test/src/
 forge-std/=lib/forge-std/src/
+@prb/math/=lib/prb-math/src/
+clones/=lib/clones-with-immutable-args/src/
+solmate/=lib/solmate/src/
+@tenderize/swap/=src/
+@tenderize/stake/=lib/staking/src/
+test/=test/
+openzeppelin-contracts-upgradeable/=lib/staking/lib/openzeppelin-contracts-upgradeable/contracts/
+openzeppelin-contracts/=lib/staking/lib/openzeppelin-contracts/contracts/

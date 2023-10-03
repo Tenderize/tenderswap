@@ -10,7 +10,6 @@
 // Copyright (c) Tenderize Labs Ltd
 
 import { UD60x18, ZERO, UNIT, unwrap, ud } from "@prb/math/UD60x18.sol";
-import { ClonesWithImmutableArgs } from "clones/ClonesWithImmutableArgs.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
@@ -21,6 +20,7 @@ import { SafeCastLib } from "solmate/utils/SafeCastLib.sol";
 
 import { Multicall } from "@tenderize/swap/util/Multicall.sol";
 import { SelfPermit } from "@tenderize/swap/util/SelfPermit.sol";
+import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
@@ -31,7 +31,7 @@ pragma solidity >=0.8.19;
 UD60x18 constant BASE_FEE = UD60x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
 UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
-UD60x18 constant POW = UD60x18.wrap(3e18);
+UD60x18 constant K = UD60x18.wrap(3e18);
 
 struct Config {
     ERC20 underlying;
@@ -39,7 +39,14 @@ struct Config {
     address unlocks;
 }
 
-contract TenderSwapStorage {
+struct SwapParams {
+    UD60x18 u;
+    UD60x18 U;
+    UD60x18 s;
+    UD60x18 S;
+}
+
+abstract contract SwapStorage {
     uint256 private constant SSLOT = uint256(keccak256("xyz.tenderize.swap.storage.location")) - 1;
 
     struct Data {
@@ -48,7 +55,7 @@ contract TenderSwapStorage {
         // total amount of liabilities owed to LPs
         uint256 liabilities;
         // sum of token supplies that have outstanding unlocks
-        uint256 S;
+        UD60x18 S;
         // Unlock queue to hold unlocks
         UnlockQueue.Data unlockQ;
         // Recovery amount, if `recovery` > 0 enable recovery mode
@@ -56,7 +63,7 @@ contract TenderSwapStorage {
         // amount unlocking per asset
         mapping(address asset => uint256 unlocking) unlockingForAsset;
         // last supply of a tenderizer when seen, tracked because they are rebasing tokens
-        mapping(address asset => uint256 lastSupply) lastSupplyForAsset;
+        mapping(address asset => UD60x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 fee) relayerFees;
     }
@@ -71,7 +78,7 @@ contract TenderSwapStorage {
     }
 }
 
-contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
+contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     using SafeTransferLib for ERC20;
     using SafeCastLib for uint256;
     using UnlockQueue for UnlockQueue.Data;
@@ -103,7 +110,8 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
     }
 
     modifier supplyUpdateHook(address asset) {
-        _supplyUpdateHook(asset);
+        Data storage $ = _loadStorageSlot();
+        // _supplyUpdateHook(asset);
         _;
     }
 
@@ -132,22 +140,6 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         Data storage $ = _loadStorageSlot();
         if ($.liabilities == 0) return ZERO;
         r = _utilisation($.unlocking, $.liabilities);
-    }
-
-    /**
-     * @notice Current general utilisation fee given the current utilisation ratio
-     * @dev `utilisationFee = utilisation^n`
-     */
-    function utilisationFee() public view returns (UD60x18 f) {
-        f = _utilisationFee(utilisation());
-    }
-
-    /**
-     * @notice Current spread multiplier for an asset that can be exchanged.
-     * The spread is based on the individual utilisation ratio of the asset and its supply vs other assets
-     */
-    function spread(address asset) public view returns (UD60x18 s) {
-        return _spread(asset, 0);
     }
 
     /**
@@ -228,11 +220,14 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
      * @return fee Amount of fees paid
      */
     function quote(address asset, uint256 amount) public view returns (uint256 out, uint256 fee) {
-        (bool success, bytes memory returnData) =
-            address(this).staticcall(abi.encodeWithSelector(this.swap.selector, asset, amount));
-        if (success) {
-            (out, fee) = abi.decode(returnData, (uint256, uint256));
-        }
+        Data storage $ = _loadStorageSlot();
+
+        UD60x18 U = ud($.unlocking);
+        UD60x18 u = ud($.unlockingForAsset[asset]);
+        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+
+        SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
+        return _quote(asset, amount, p);
     }
 
     /**
@@ -245,20 +240,19 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
      * @return out Amount of output tokens
      * @return fee Amount of fees paid
      */
-    function swap(
-        address asset,
-        uint256 amount,
-        uint256 minOut
-    )
-        external
-        supplyUpdateHook(asset)
-        returns (uint256 out, uint256 fee)
-    {
+    function swap(address asset, uint256 amount, uint256 minOut) external returns (uint256 out, uint256 fee) {
         if (!_isValidAsset(asset)) revert InvalidAsset(asset);
 
         Data storage $ = _loadStorageSlot();
 
-        (out, fee) = _quote(asset, amount);
+        UD60x18 U = ud($.unlocking);
+        UD60x18 u = ud($.unlockingForAsset[asset]);
+        UD60x18 x = ud(amount);
+        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+
+        SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
+
+        (out, fee) = _quote(asset, amount, p);
 
         // Revert if slippage threshold is exceeded, i.e. if `out` is less than `minOut`
         if (out < minOut) revert SlippageThresholdExceeded(out, minOut);
@@ -267,9 +261,9 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         // - Update total amount unlocking
         $.unlocking += amount;
         // - update supplyForAsset
-        $.lastSupplyForAsset[asset] -= amount;
+        $.lastSupplyForAsset[asset] = s.sub(x);
         // - update S
-        $.S -= amount;
+        $.S = S.sub(x);
         // - update unlockingForAsset
         $.unlockingForAsset[asset] += amount;
 
@@ -321,8 +315,8 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         uint256 ufa = $.unlockingForAsset[tenderizer] - unlock.amount;
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
-            $.S -= $.lastSupplyForAsset[tenderizer];
-            delete $.lastSupplyForAsset[tenderizer];
+            $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
+            $.lastSupplyForAsset[tenderizer] = ZERO;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -355,8 +349,6 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         (address tenderizer, uint96 id) = _decodeTokenId(unlock.id);
         uint256 amountReceived = Tenderizer(tenderizer).withdraw(address(this), id);
 
-        // TODO: Handle amount received > 0 ?
-
         //calculate the relayer reward
         uint256 relayerReward = unwrap(ud(unlock.fee).mul(RELAYER_CUT));
         // update relayer rewards
@@ -364,12 +356,26 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
 
         uint256 fee = unlock.fee - relayerReward;
 
-        // Handle potential recovery mode
         {
             uint256 recovery = $.recovery;
 
+            // Handle deficit
             if (amountReceived < unlock.amount) {
                 recovery += unlock.amount - amountReceived;
+            }
+
+            // Handle surplus
+            if (amountReceived > unlock.amount) {
+                uint256 excess = amountReceived - unlock.amount;
+                amountReceived = unlock.amount;
+                if (excess > recovery) {
+                    excess -= recovery;
+                    recovery = 0;
+                    $.liabilities += excess;
+                } else {
+                    recovery -= excess;
+                    excess = 0;
+                }
             }
 
             if (recovery > 0) {
@@ -394,8 +400,8 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         uint256 ufa = $.unlockingForAsset[tenderizer] - amountReceived;
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
-            $.S -= $.lastSupplyForAsset[tenderizer];
-            delete $.lastSupplyForAsset[tenderizer];
+            $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
+            $.lastSupplyForAsset[tenderizer] = ZERO;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -406,28 +412,32 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         emit UnlockRedeemed(msg.sender, unlock.id, amountReceived, relayerReward, fee);
     }
 
-    function _quote(address asset, uint256 amount) internal view returns (uint256 out, uint256 fee) {
+    function _quote(address asset, uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        // calculate utilisation rate
-        UD60x18 r = _utilisation($.unlocking + amount, $.liabilities);
+        UD60x18 x = ud(amount);
+        UD60x18 L = ud($.liabilities);
 
-        // calculate spread multiplier
-        UD60x18 w = _spread(asset, amount);
+        {
+            UD60x18 nom = p.u.add(x).mul(K).add(p.u).sub(p.U).mul(p.U.add(x).div(L).pow(K));
 
-        // calculate fee by multiplying the base fee by the spread
-        UD60x18 f = _utilisationFee(r).mul(w);
+            K.mul(p.u).gt(p.U.sub(p.u))
+                ? nom = nom.sub(K.mul(p.u).add(p.u).sub(p.U).mul(p.U.div(L).pow(K)))
+                : nom = nom.add(p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K)));
 
-        f = f.gt(UNIT) ? UNIT : f; // max 100% fee
+            nom = nom.mul(p.S.add(p.U));
 
-        // get the marginal fee
-        fee = f.mul(ud(amount)).unwrap();
+            UD60x18 denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
 
-        // get the output amount
+            fee = BASE_FEE.mul(x).add(nom.div(denom)).unwrap();
+
+            fee = fee >= amount ? amount : fee;
+        }
         unchecked {
             out = amount - fee;
         }
     }
+    // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
 
     /**
      * @notice checks if an asset is a valid tenderizer for `underlying`
@@ -438,19 +448,6 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
 
     function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (UD60x18 r) {
         r = ud(unlocking).div(ud(liabilities));
-    }
-
-    function _utilisationFee(UD60x18 r) internal pure returns (UD60x18 f) {
-        f = BASE_FEE.add(r.pow(POW));
-        f > UNIT ? UNIT : f;
-    }
-
-    function _spread(address asset, uint256 x) internal view returns (UD60x18 w) {
-        Data storage $ = _loadStorageSlot();
-
-        ud($.unlockingForAsset[asset] + x).div(ud($.unlocking + x)).div(ud($.lastSupplyForAsset[asset] + x).div(ud($.S + x)));
-
-        w = ud(($.unlockingForAsset[asset] + x) * $.lastSupplyForAsset[asset]).div(ud(($.unlocking + x) * $.S));
     }
 
     function _unlock(address asset, uint256 amount, uint256 fee) internal {
@@ -465,7 +462,6 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
         uint256 maturity = t.unlockMaturity(id);
 
         $.unlockQ.push(
-            key,
             UnlockQueue.Item({
                 id: key,
                 amount: SafeCastLib.safeCastTo128(amount),
@@ -479,19 +475,19 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
      * @notice Since the LSTs to be exchanged are aTokens, and thus have a rebasing supply,
      * we need to update the supplies upon a swap to correctly determine the spread of the asset.
      */
-    function _supplyUpdateHook(address tenderizer) internal {
+    function _checkSupply(address tenderizer) internal view returns (UD60x18 s, UD60x18 S) {
         Data storage $ = _loadStorageSlot();
 
-        uint256 newSupply = Tenderizer(tenderizer).totalSupply();
-        uint256 oldSupply = $.lastSupplyForAsset[tenderizer];
+        S = $.S;
 
-        if (oldSupply < newSupply) {
-            $.S += newSupply - oldSupply;
-        } else if (oldSupply > newSupply) {
-            $.S -= oldSupply - newSupply;
+        s = ud(Tenderizer(tenderizer).totalSupply());
+        UD60x18 oldSupply = $.lastSupplyForAsset[tenderizer];
+
+        if (oldSupply.lt(s)) {
+            S = S.add(s.sub(oldSupply));
+        } else if (oldSupply.gt(s)) {
+            S = S.sub(oldSupply.sub(s));
         }
-
-        $.lastSupplyForAsset[tenderizer] = newSupply;
     }
 
     /**

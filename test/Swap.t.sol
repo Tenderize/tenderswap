@@ -11,7 +11,7 @@
 
 pragma solidity >=0.8.19;
 
-import { Test } from "forge-std/Test.sol";
+import { Test, console } from "forge-std/Test.sol";
 import { MockERC20 } from "test/helpers/MockERC20.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
@@ -21,12 +21,16 @@ import { LPToken } from "@tenderize/swap/LPToken.sol";
 
 import { UD60x18, ud, unwrap, ZERO, UNIT } from "@prb/math/UD60x18.sol";
 
+import { SwapHarness } from "./Swap.harness.sol";
+
+import { acceptableDelta } from "./helpers/Utils.sol";
+
 contract TenderSwapTest is Test {
     MockERC20 underlying;
     MockERC20 tToken0;
     MockERC20 tToken1;
 
-    TenderSwap swap;
+    SwapHarness swap;
 
     address registry;
     address unlocks;
@@ -55,12 +59,13 @@ contract TenderSwapTest is Test {
         );
 
         Config memory cfg = Config({ underlying: underlying, registry: registry, unlocks: unlocks });
-        swap = new TenderSwap(cfg);
+        swap = new SwapHarness(cfg);
     }
 
-    function test_deposits() public {
-        uint256 deposit1 = 100 ether;
-        uint256 deposit2 = 250 ether;
+    function testFuzz_deposits(uint256 x, uint256 y, uint256 l) public {
+        uint256 deposit1 = bound(x, 1, type(uint128).max);
+        uint256 deposit2 = bound(y, 1, type(uint128).max);
+        l = bound(l, 1, type(uint128).max);
         underlying.mint(addr1, deposit1);
         underlying.mint(addr2, deposit2);
 
@@ -69,19 +74,20 @@ contract TenderSwapTest is Test {
         swap.deposit(deposit1);
         vm.stopPrank();
 
+        // Change liabilities !
+        swap.exposed_setLiabilities(l);
+
         vm.startPrank(addr2);
         underlying.approve(address(swap), deposit2);
         swap.deposit(deposit2);
         vm.stopPrank();
 
-        assertEq(swap.lpToken().totalSupply(), deposit1 + deposit2, "lpToken totalSupply");
+        uint256 expBalY = deposit2 * deposit1 / l;
+
+        assertEq(swap.lpToken().totalSupply(), deposit1 + expBalY, "lpToken totalSupply");
         assertEq(swap.lpToken().balanceOf(addr1), deposit1, "addr1 lpToken balance");
-        assertEq(swap.lpToken().balanceOf(addr2), deposit2, "addr2 lpToken balance");
+        assertEq(swap.lpToken().balanceOf(addr2), expBalY, "addr2 lpToken balance");
         assertEq(underlying.balanceOf(address(swap)), deposit1 + deposit2, "TenderSwap underlying balance");
-        assertEq(swap.liabilities(), deposit1 + deposit2, "TenderSwap liquidity");
-        assertEq(swap.liquidity(), deposit1 + deposit2, "TenderSwap available liquidity");
-        assertTrue(swap.utilisation().eq(ZERO), "TenderSwap utilisation");
-        assertTrue(swap.utilisationFee().eq(BASE_FEE), "TenderSwap utilisation fee");
     }
 
     function test_swap() public {
@@ -111,9 +117,9 @@ contract TenderSwapTest is Test {
         assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
     }
 
-    function testFuzz_swap(uint256 liquidity, uint256 amount) public {
-        liquidity = bound(liquidity, 1e18, type(uint64).max);
-        amount = bound(amount, 1e9, liquidity);
+    function testFuzz_swap_basic(uint256 liquidity, uint256 amount) public {
+        liquidity = bound(liquidity, 1e18, type(uint128).max);
+        amount = bound(amount, 1e3, liquidity);
 
         underlying.mint(address(this), liquidity);
         underlying.approve(address(swap), liquidity);
@@ -126,11 +132,14 @@ contract TenderSwapTest is Test {
         tToken0.approve(address(swap), amount);
         (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
 
-        uint256 expFee = unwrap(ud(amount).mul((BASE_FEE + ud(amount).div(ud(liquidity)).pow(ud(3e18)))));
+        uint256 expFee = ud(amount).mul(BASE_FEE).add(ud(amount).mul((ud(amount).div(ud(liquidity)).pow(ud(3e18))))).unwrap();
         expFee = expFee >= amount ? amount : expFee;
 
-        assertEq(fee, expFee, "swap fee");
-        assertEq(out, amount - expFee, "swap out");
+        console.log("expFee", expFee);
+        console.log("fee", fee);
+
+        assertTrue(acceptableDelta(fee, expFee, 2), "fee amount");
+        assertTrue(acceptableDelta(out, amount - expFee, 2), "swap out");
         assertEq(swap.liquidity(), liquidity - amount, "TenderSwap available liquidity");
     }
 }

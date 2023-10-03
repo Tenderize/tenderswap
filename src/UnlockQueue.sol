@@ -40,20 +40,6 @@ library UnlockQueue {
     }
 
     /**
-     * @notice returns the oldest element in the queue
-     */
-    function head(UnlockQueue.Data storage q) internal view returns (Item memory) {
-        return q.nodes[q.head].data;
-    }
-
-    /**
-     * @notice returns the newest element in the queue
-     */
-    function tail(UnlockQueue.Data storage q) internal view returns (Item memory) {
-        return q.nodes[q.tail].data;
-    }
-
-    /**
      * @notice Pop the oldest element from the queue
      * @param q The queue to pop from
      */
@@ -100,12 +86,11 @@ library UnlockQueue {
     /**
      * @notice Push a new element to the back of the queue
      * @param q The queue to push to
-     * @param id The id of the unlock
      * @param unlock The unlock data to push
      */
-    function push(UnlockQueue.Data storage q, uint256 id, Item memory unlock) internal {
+    function push(UnlockQueue.Data storage q, Item memory unlock) internal {
         uint256 tail = q.tail;
-        uint256 newTail = id;
+        uint256 newTail = unlock.id;
 
         q.nodes[newTail].data = unlock;
         q.nodes[newTail].prev = tail;

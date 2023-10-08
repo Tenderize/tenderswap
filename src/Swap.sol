@@ -31,12 +31,30 @@ pragma solidity >=0.8.19;
 UD60x18 constant BASE_FEE = UD60x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
 UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
-UD60x18 constant POW = UD60x18.wrap(3e18);
+UD60x18 constant POW = UD60x18.wrap(3e18); // K factor
+UD60x18 constant ONE = UD60x18.wrap(1e18);
+UD60x18 constant TWO = UD60x18.wrap(2e18);
 
 struct Config {
     ERC20 underlying;
     address registry;
     address unlocks;
+}
+
+struct FeeParams {
+    UD60x18 x; // Amount
+    UD60x18 u; // Pool utilisation
+    UD60x18 s; // Pool supply
+    UD60x18 U; // Total utilisation
+    UD60x18 S; // Total Supply
+    UD60x18 L; // Total liabilities
+}
+
+struct InterParams {
+    UD60x18 right_k_u;
+    UD60x18 rightFactor;
+    UD60x18 left_k_u;
+    UD60x18 leftFactor;
 }
 
 contract TenderSwapStorage {
@@ -409,24 +427,68 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
     function _quote(address asset, uint256 amount) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        // calculate utilisation rate
-        UD60x18 r = _utilisation($.unlocking + amount, $.liabilities);
+        // WARNING
+        // It is assumed here that the amount parameters are already expressed in a fixed point form
+        // That is, if the amount is for example 1, then x is represented as 1e18
+        // Furthermore, all the information that is needed to calculate the fee is loaded here.
+        FeeParams memory params = FeeParams(
+            ud(amount), // Amount
+            ud($.unlockingForAsset[asset]), // Pool unlocks;
+            ud($.lastSupplyForAsset[asset]), // Pool supply
+            ud($.unlocking), // Total unlock
+            ud($.S), // Total supply
+            ud($.liabilities) // Total liabilities
+        );
 
-        // calculate spread multiplier
-        UD60x18 w = _spread(asset, amount);
-
-        // calculate fee by multiplying the base fee by the spread
-        UD60x18 f = _utilisationFee(r).mul(w);
-
-        f = f.gt(UNIT) ? UNIT : f; // max 100% fee
-
-        // get the marginal fee
-        fee = f.mul(ud(amount)).unwrap();
+        fee = unwrap(_calcFee(params)); 
 
         // get the output amount
         unchecked {
             out = amount - fee;
         }
+    }
+
+    function _calcFee(FeeParams memory params) 
+        private pure returns (UD60x18) {
+
+            // Investigate right size: U - 2u - ku
+            InterParams memory ip = _interFeeCalc(params);
+
+            // Calculate U/L ^ k factors
+            UD60x18 leftPower = _power(params.U.add(params.x).div(params.L), POW);
+            UD60x18 rightPower = _power(params.U.mul(params.U.div(params.L), POW));
+
+            // At most one side is negative, as the original function is only non-negative when x>=0,
+            // and thus the are is only non-negative. Furthermore, right_U_bigger => left_U_bigger
+
+            if(params.U.lt(ip.right_k_u)) {
+                return  leftPower.mul(ip.leftFactor).sub(ip.rightFactor.mul(rightPower)).mul(params.S.add(params.U))
+                .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+            } else {
+                if (params.U.gte(ip.left_k_u)) {
+                    return rightPower.mul(ip.rightFactor).sub(ip.leftFactor.mul(leftPower)).mul(params.S.add(params.U))
+                                    .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+                } else {
+                    return rightPower.mul(ip.rightFactor).add(ip.leftFactor.mul(leftPower)).mul(params.S.add(params.U))
+                .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+                }
+            }
+
+    }
+
+    function _interFeeCalc(FeeParams memory params) private pure returns (InterParams memory) {
+
+        UD60x18 right_k_u = params.u.mul(TWO.add(POW));
+        UD60x18 rightFactor = params.U.gt(right_k_u) ? params.U.sub(right_k_u) : right_k_u.sub(params.U);
+
+        //Investigate left size: U - 2u - x - kx - ku
+        UD60x18 left_k_u = right_k_u.add(ONE.add(POW).mul(params.x));
+        
+        // If right hand U < 2u - ku, then left automatically also smaller
+        UD60x18 leftFactor = params.U.gte(left_k_u) ? params.U.add(params.x).mul(params.U.sub(left_k_u))
+                                            :params.U.add(params.x).mul(left_k_u.sub(params.U));
+
+        return InterParams(right_k_u, rightFactor, left_k_u, leftFactor);
     }
 
     /**
@@ -441,7 +503,7 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
     }
 
     function _utilisationFee(UD60x18 r) internal pure returns (UD60x18 f) {
-        f = BASE_FEE.add(r.pow(POW));
+        f = BASE_FEE.add(_power(r, POW));
         f > UNIT ? UNIT : f;
     }
 
@@ -517,4 +579,22 @@ function _encodeTokenId(address tenderizer, uint96 id) pure returns (uint256) {
 function _decodeTokenId(uint256 tokenId) pure returns (address tenderizer, uint96 id) {
     bytes32 a = bytes32(tokenId);
     return (address(bytes20(a)), uint96(bytes12(a << 160)));
+}
+
+/**
+ * Raises value to the power of second parameter. This function always assumes that power is a natural number,
+ * that is, a strict positive integer. Testing this function against an iterative approach in Remix gives the result
+ * that this approach is cheaper when k >= 3.
+ */
+function _power(UD60x18 value, UD60x18 power) pure returns(UD60x18) {
+    uint256 factor = unwrap(power) / 1e18;
+    uint256 response = ONE;
+    while (factor >= 1) {
+        if (factor & 1 == 1) {
+            response = response.mul(value);
+        }
+        value = value.mul(value);
+        factor >>= 1;
+    }
+    return wrap(response * 1e18);
 }

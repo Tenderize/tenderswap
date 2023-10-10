@@ -41,11 +41,6 @@ contract TenderSwapTest is Test {
 
         registry = vm.addr(123);
         unlocks = vm.addr(567);
-
-        addr1 = vm.addr(111);
-        addr2 = vm.addr(222);
-
-        // default mock calls
         vm.mockCall(registry, abi.encodeWithSelector(Registry.isTenderizer.selector), abi.encode(true));
         vm.mockCall(
             address(tToken0), abi.encodeWithSelector(TenderizerImmutableArgs.asset.selector), abi.encode(address(underlying))
@@ -132,5 +127,51 @@ contract TenderSwapTest is Test {
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
         assertEq(swap.liquidity(), liquidity - amount, "TenderSwap available liquidity");
+    }
+
+    function testZeroSwap() public {
+        // Zero test, first with only one token, then two token
+
+        // Case 1 tToken, no unlocks
+        uint256 liquidity = 100 ether;
+
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity);
+
+        uint256 amount = 0 ether;
+        uint256 tokenId = _encodeTokenId(address(tToken0), 0);
+
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+
+        tToken0.mint(address(this), 100 ether);
+        tToken0.approve(address(swap), 10 ether);
+        (uint256 out, uint256 fee) = swap.swap(address(tToken0), 0 ether, 0 ether);
+
+        assertEq(out, 0, "No amount goes out");
+        assertEq(fee, 0, "No fee paid");
+        assertEq(swap.liquidity(), 100 ether, "No amount unlocked");
+
+        // Add second token to check no errors happen here
+        uint256 liquidity2 = 200 ether;
+        underlying.mint(address(this), liquidity2);
+        underlying.approve(address(swap), liquidity2);
+        swap.deposit(liquidity2);
+        
+        // Sanity check to see whether deposit worked correctly
+        assertEq(swap.liquidity(), 300 ether, "Second deposit succesful!");
+
+        vm.mockCall(address(tToken1), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
+        vm.mockCall(address(tToken1), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+
+        tToken1.mint(address(this), 200 ether);
+        tToken1.approve(address(swap), 200 ether);
+
+        (uint256 out2, uint256 fee2) = swap.swap(address(tToken1), 0 ether, 0 ether);
+
+        assertEq(out2, 0 ether, "No amount goes it in multiple token case");
+        assertEq(fee2, 0 ether, "No fee in multiple token case");
+        assertEq(swap.liquidity(), 300 ether, "No amount unlocked in multiple token case");
     }
 }

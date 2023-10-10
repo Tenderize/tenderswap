@@ -456,7 +456,7 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
 
             // Calculate U/L ^ k factors
             UD60x18 leftPower = _power(params.U.add(params.x).div(params.L), POW);
-            UD60x18 rightPower = _power(params.U.mul(params.U.div(params.L), POW));
+            UD60x18 rightPower = params.U.mul(_power(params.U.div(params.L), POW));
 
             // At most one side is negative, as the original function is only non-negative when x>=0,
             // and thus the are is only non-negative. Furthermore, right_U_bigger => left_U_bigger
@@ -588,7 +588,7 @@ function _decodeTokenId(uint256 tokenId) pure returns (address tenderizer, uint9
  */
 function _power(UD60x18 value, UD60x18 power) pure returns(UD60x18) {
     uint256 factor = unwrap(power) / 1e18;
-    uint256 response = ONE;
+    UD60x18 response = ONE;
     while (factor >= 1) {
         if (factor & 1 == 1) {
             response = response.mul(value);
@@ -596,5 +596,5 @@ function _power(UD60x18 value, UD60x18 power) pure returns(UD60x18) {
         value = value.mul(value);
         factor >>= 1;
     }
-    return wrap(response * 1e18);
+    return response;
 }

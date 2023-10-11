@@ -9,7 +9,7 @@
 //
 // Copyright (c) Tenderize Labs Ltd
 
-import { UD60x18, ZERO, UNIT, unwrap, ud } from "@prb/math/UD60x18.sol";
+import { UD60x18, ZERO, UNIT, unwrap, ud, wrap } from "@prb/math/UD60x18.sol";
 import { ClonesWithImmutableArgs } from "clones/ClonesWithImmutableArgs.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
@@ -48,6 +48,7 @@ struct FeeParams {
     UD60x18 U; // Total utilisation
     UD60x18 S; // Total Supply
     UD60x18 L; // Total liabilities
+    UD60x18 k; // Power factor
 }
 
 struct InterParams {
@@ -437,7 +438,8 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
             ud($.lastSupplyForAsset[asset]), // Pool supply
             ud($.unlocking), // Total unlock
             ud($.S), // Total supply
-            ud($.liabilities) // Total liabilities
+            ud($.liabilities), // Total liabilities
+            POW
         );
 
         fee = unwrap(_calcFee(params)); 
@@ -449,28 +451,28 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
     }
 
     function _calcFee(FeeParams memory params) 
-        private pure returns (UD60x18) {
+        internal pure returns (UD60x18) {
 
             // Investigate right size: U - 2u - ku
             InterParams memory ip = _interFeeCalc(params);
 
             // Calculate U/L ^ k factors
-            UD60x18 leftPower = _power(params.U.add(params.x).div(params.L), POW);
-            UD60x18 rightPower = params.U.mul(_power(params.U.div(params.L), POW));
+            UD60x18 leftPower = _power(params.U.add(params.x).div(params.L), params.k);
+            UD60x18 rightPower = params.U.mul(_power(params.U.div(params.L), params.k));
 
             // At most one side is negative, as the original function is only non-negative when x>=0,
             // and thus the are is only non-negative. Furthermore, right_U_bigger => left_U_bigger
 
             if(params.U.lt(ip.right_k_u)) {
                 return  leftPower.mul(ip.leftFactor).sub(ip.rightFactor.mul(rightPower)).mul(params.S.add(params.U))
-                .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+                .div(params.L.mul(params.s.add(params.u)).mul(params.k.add(ONE)).mul(params.k.add(TWO)));
             } else {
                 if (params.U.gte(ip.left_k_u)) {
                     return rightPower.mul(ip.rightFactor).sub(ip.leftFactor.mul(leftPower)).mul(params.S.add(params.U))
-                                    .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+                                    .div(params.L.mul(params.s.add(params.u)).mul(params.k.add(ONE)).mul(params.k.add(TWO)));
                 } else {
                     return rightPower.mul(ip.rightFactor).add(ip.leftFactor.mul(leftPower)).mul(params.S.add(params.U))
-                .div(params.L.mul(params.s.add(params.u)).mul(POW.add(ONE)).mul(POW.add(TWO)));
+                .div(params.L.mul(params.s.add(params.u)).mul(params.k.add(ONE)).mul(params.k.add(TWO)));
                 }
             }
 
@@ -478,11 +480,11 @@ contract TenderSwap is TenderSwapStorage, Multicall, SelfPermit {
 
     function _interFeeCalc(FeeParams memory params) private pure returns (InterParams memory) {
 
-        UD60x18 right_k_u = params.u.mul(TWO.add(POW));
+        UD60x18 right_k_u = params.u.mul(TWO.add(params.k));
         UD60x18 rightFactor = params.U.gt(right_k_u) ? params.U.sub(right_k_u) : right_k_u.sub(params.U);
 
         //Investigate left size: U - 2u - x - kx - ku
-        UD60x18 left_k_u = right_k_u.add(ONE.add(POW).mul(params.x));
+        UD60x18 left_k_u = right_k_u.add(ONE.add(params.k).mul(params.x));
         
         // If right hand U < 2u - ku, then left automatically also smaller
         UD60x18 leftFactor = params.U.gte(left_k_u) ? params.U.add(params.x).mul(params.U.sub(left_k_u))

@@ -16,10 +16,31 @@ import { MockERC20 } from "test/helpers/MockERC20.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 
-import { TenderSwap, Config, BASE_FEE, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, Config, BASE_FEE, _encodeTokenId, _decodeTokenId, FeeParams } from "@tenderize/swap/Swap.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
-import { UD60x18, ud, unwrap, ZERO, UNIT } from "@prb/math/UD60x18.sol";
+import { UD60x18, ud, unwrap, ZERO, UNIT, wrap } from "@prb/math/UD60x18.sol";
+
+
+contract FeeCalculatorHarness is TenderSwap {
+
+
+    constructor(Config memory config) TenderSwap(config) {}
+
+    function fee_test(uint256 x, uint256 u, uint256 s, uint256 U, uint256 S, uint256 L, uint256 k) external returns (uint256 response) {
+        FeeParams memory params = FeeParams(
+            wrap(x * 1e18),
+            wrap(u * 1e18),
+            wrap(s * 1e18),
+            wrap(U * 1e18),
+            wrap(S * 1e18),
+            wrap(L * 1e18),
+            wrap(k * 1e18)
+        );
+
+        response = unwrap(super._calcFee(params));
+    }
+}
 
 contract TenderSwapTest is Test {
     MockERC20 underlying;
@@ -27,6 +48,7 @@ contract TenderSwapTest is Test {
     MockERC20 tToken1;
 
     TenderSwap swap;
+    FeeCalculatorHarness feeSwap;
 
     address registry;
     address unlocks;
@@ -51,6 +73,7 @@ contract TenderSwapTest is Test {
 
         Config memory cfg = Config({ underlying: underlying, registry: registry, unlocks: unlocks });
         swap = new TenderSwap(cfg);
+        feeSwap = new FeeCalculatorHarness(cfg);
     }
 
     function test_deposits() public {
@@ -173,5 +196,122 @@ contract TenderSwapTest is Test {
         assertEq(out2, 0 ether, "No amount goes it in multiple token case");
         assertEq(fee2, 0 ether, "No fee in multiple token case");
         assertEq(swap.liquidity(), 300 ether, "No amount unlocked in multiple token case");
+    }
+
+    // Test to check for every variable for consistency
+    function testUniqueTokenSwap() public {
+        // Case U < u * (2 + k) is not possible with one token
+        // Case U >= u * (2 + k) + (1 + k) * x only possible when x = 0
+        uint256 response = feeSwap.fee_test(0, 0, 100, 0, 100, 1000, 3);
+        assertEq(response, 0, "Case U >= u * (2 + k) + (1 + k) * x");
+        
+        // Case else
+
+        // Case x = 0..100..20, u = 200, s = 100, U = 200, S = 100, L = 1000, k = 3, this is done with Maple
+        uint256[6] memory responses;
+        responses[0] = 0;
+        responses[1] = 39072640000000000;
+        responses[2] = 95252480000000000;
+        responses[3] = 173627520000000000;
+        responses[4] = 280207360000000000;
+        responses[5] = 422000000000000000;
+
+        for (uint256 i = 0; i < 6; i++) {
+            uint256 x = i * 20;
+            assertTrue(around(feeSwap.fee_test(x, 200, 100, 200, 100, 1000, 3), responses[i], 3));
+        }
+
+        // Case x = 100, u = 200, s = 100..600..100, U = 200, S = s, L = 1000, k = 3, tested with maple
+        for (uint256 i = 100; i < 600; i = i + 100) {
+            assertTrue(around(feeSwap.fee_test(100, 200, i, 200, i, 1000, 3), 422000000000000000, 1000));
+        }
+
+        // Case x = 100, u = 0..1000..200, s = 200, U = u, S = s, L = 1000, k = 3, tested with maple
+        responses[0] = 2000000000000000;
+        responses[1] = 422000000000000000;
+        responses[2] = 4202000000000000000;
+        responses[3] = 18062000000000000000;
+        responses[4] = 52562000000000000000;
+        responses[5] = 122102000000000000000;
+
+        for (uint256 i = 0; i < 6; i++) {
+            uint256 u = i * 200;
+            assertTrue(around(feeSwap.fee_test(100, u, 200, u, 200, 1000, 3), responses[i], 1000));
+        }
+
+        // Case x = 100, u = 100, s = 200, U = u, S = s, L = 1..10001..200, k = 3, tested with maple
+        responses[0] = 62000000000000000000000000000;
+        responses[1] = 37984591465925498575;
+        responses[2] = 2397806864000000000;
+        responses[3] = 475219005900000000;
+        responses[4] = 150612710800000000;
+        responses[5] = 61752618760000000;
+
+        for (uint256 i = 0; i < 2; i++) {
+            uint256 L = 1 + i * 200;
+            uint256 resp = feeSwap.fee_test(100, 100, 200, 100, 200, L, 3);
+            assertTrue(around(resp, responses[i], 1000));
+        }
+
+        responses[0] = 2333333333333333333;
+        responses[1] = 375000000000000000;
+        responses[2] = 62000000000000000;
+        responses[3] = 10500000000000000;
+        responses[4] = 1814285714285714;
+        responses[5] = 318750000000000;
+
+        for (uint256 i = 0; i < 5; i++) {
+            uint256 resp = feeSwap.fee_test(100, 100, 200, 100, 200, 1000, i + 1);
+            assertTrue(around(resp, responses[i], 1000));
+        }
+
+    }
+
+    // Test used to check two other branches
+    function testMultipleTokenSwap() public {
+        // Case U < u * (2 + k)
+
+        // Case x = 50, u = 100, U = 150, s = 60, S = 100, L = 200, k = 5
+        uint256 resp = feeSwap.fee_test(50, 100, 150, 60, 100, 200, 5);
+        assertTrue(around(resp, 389382738095238095, 1000));
+
+        // Case x = 0, u = 100, U = 150, s = 60, S = 100, L = 200, k = 5
+        resp = feeSwap.fee_test(0, 100, 150, 60, 100, 200, 5);
+        assertTrue(around(resp, 0, 1));
+
+        // Case U >= u * (2 + k) + (1 + k) * x and x =/= 0
+
+        resp = feeSwap.fee_test(100, 200, 1000, 100000, 200000, 1000000, 3);
+        assertTrue(around(resp, 6260006876750000, 1000));
+
+        // Few more general cases.
+
+        // Case x = 60, u = 0, U = 1000, s = 60, S = 200, L = 300, k = 1
+        resp = feeSwap.fee_test(60, 0, 1000, 60, 200, 300, 1);
+        assertTrue(around(resp, 520000000000000000, 1000));
+
+        // Case x = 60, u = 0, U = 0, s = 60, S = 100, L = 500, k = 15
+        resp = feeSwap.fee_test(60, 0, 60, 0, 100, 500, 15);
+        assertTrue(around(resp, 10875, 1000));
+
+        // Case x = 100, u = 0, U = 200, s = 100, S = 100, L = 500, k = 2
+        resp = feeSwap.fee_test(100, 0, 100, 200, 100, 500, 2);
+        assertTrue(around(resp, 8600000000000000000, 1000));
+
+        // Case x = 100, u = 200, U = 200, s = 100, S = 1000, L = 1000, k = 4
+        resp = feeSwap.fee_test(100, 200, 100, 200, 1000, 1000, 4);
+        assertTrue(around(resp, 443333333333333333, 10000));
+    }
+
+    function testAroundSanity() public {
+        assertTrue(around(2, 0, 2));
+        assertFalse(around(2, 0, 1));
+        assertTrue(around(2, 4, 2));
+        assertFalse(around(2, 4, 1));
+    }
+
+    // Helper function to 
+    function around(uint256 expected, uint256 value, uint256 epsilon) internal pure returns (bool resp) {
+        expected > value ? resp = (expected - value <= epsilon) : resp = (value - expected <= epsilon);
     }
 }

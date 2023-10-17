@@ -9,7 +9,7 @@
 //
 // Copyright (c) Tenderize Labs Ltd
 
-import { UD60x18, ZERO, UNIT, unwrap, ud } from "@prb/math/UD60x18.sol";
+import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
@@ -28,10 +28,10 @@ pragma solidity >=0.8.19;
 
 // TODO: UUPS upgradeable
 
-UD60x18 constant BASE_FEE = UD60x18.wrap(0.0005e18);
-UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
-UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
-UD60x18 constant K = UD60x18.wrap(3e18);
+SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
+SD59x18 constant RELAYER_CUT = SD59x18.wrap(0.1e18);
+SD59x18 constant MIN_LP_CUT = SD59x18.wrap(0.1e18);
+SD59x18 constant K = SD59x18.wrap(3e18);
 
 struct Config {
     ERC20 underlying;
@@ -40,10 +40,10 @@ struct Config {
 }
 
 struct SwapParams {
-    UD60x18 u;
-    UD60x18 U;
-    UD60x18 s;
-    UD60x18 S;
+    SD59x18 u;
+    SD59x18 U;
+    SD59x18 s;
+    SD59x18 S;
 }
 
 abstract contract SwapStorage {
@@ -55,7 +55,7 @@ abstract contract SwapStorage {
         // total amount of liabilities owed to LPs
         uint256 liabilities;
         // sum of token supplies that have outstanding unlocks
-        UD60x18 S;
+        SD59x18 S;
         // Unlock queue to hold unlocks
         UnlockQueue.Data unlockQ;
         // Recovery amount, if `recovery` > 0 enable recovery mode
@@ -63,7 +63,7 @@ abstract contract SwapStorage {
         // amount unlocking per asset
         mapping(address asset => uint256 unlocking) unlockingForAsset;
         // last supply of a tenderizer when seen, tracked because they are rebasing tokens
-        mapping(address asset => UD60x18 lastSupply) lastSupplyForAsset;
+        mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 fee) relayerFees;
     }
@@ -136,7 +136,7 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
      * @notice Current general utilisation ratio of the pool's liquidity
      * @dev `utilisation = unlocking / liabilities`
      */
-    function utilisation() public view returns (UD60x18 r) {
+    function utilisation() public view returns (SD59x18 r) {
         Data storage $ = _loadStorageSlot();
         if ($.liabilities == 0) return ZERO;
         r = _utilisation($.unlocking, $.liabilities);
@@ -222,9 +222,9 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     function quote(address asset, uint256 amount) public view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        UD60x18 U = ud($.unlocking);
-        UD60x18 u = ud($.unlockingForAsset[asset]);
-        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+        SD59x18 U = sd(int256($.unlocking));
+        SD59x18 u = sd(int256($.unlockingForAsset[asset]));
+        (SD59x18 s, SD59x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
         return _quote(asset, amount, p);
@@ -245,10 +245,10 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
 
         Data storage $ = _loadStorageSlot();
 
-        UD60x18 U = ud($.unlocking);
-        UD60x18 u = ud($.unlockingForAsset[asset]);
-        UD60x18 x = ud(amount);
-        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+        SD59x18 U = sd(int256($.unlocking));
+        SD59x18 u = sd(int256($.unlockingForAsset[asset]));
+        SD59x18 x = sd(int256(amount));
+        (SD59x18 s, SD59x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
 
@@ -302,7 +302,8 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         if (unlock.maturity <= block.timestamp) revert UnlockNotMature(unlock.maturity, block.timestamp);
 
         // calculate reward after decay, take base fee cut for LPs
-        uint256 reward = (unlock.fee - unwrap(ud(unlock.fee).mul(MIN_LP_CUT))) * unlock.maturity / block.timestamp;
+        uint256 reward =
+            (unlock.fee - uint256(unwrap(sd(int256(uint256(unlock.fee))).mul(MIN_LP_CUT)))) * unlock.maturity / block.timestamp;
 
         // Update pool state
         // - update unlocking
@@ -350,7 +351,7 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         uint256 amountReceived = Tenderizer(tenderizer).withdraw(address(this), id);
 
         //calculate the relayer reward
-        uint256 relayerReward = unwrap(ud(unlock.fee).mul(RELAYER_CUT));
+        uint256 relayerReward = uint256(unwrap(sd(int256(uint256(unlock.fee))).mul(RELAYER_CUT)));
         // update relayer rewards
         $.relayerFees[msg.sender] += relayerReward;
 
@@ -415,21 +416,25 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     function _quote(address asset, uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        UD60x18 x = ud(amount);
-        UD60x18 L = ud($.liabilities);
+        SD59x18 x = sd(int256(amount));
+        SD59x18 L = sd(int256($.liabilities));
 
         {
-            UD60x18 nom = p.u.add(x).mul(K).add(p.u).sub(p.U).mul(p.U.add(x).div(L).pow(K));
+            SD59x18 nom = p.u.add(x);
+            nom = nom.mul(K);
 
-            K.mul(p.u).gt(p.U.sub(p.u))
-                ? nom = nom.sub(K.mul(p.u).add(p.u).sub(p.U).mul(p.U.div(L).pow(K)))
-                : nom = nom.add(p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K)));
-
+            nom = nom.add(p.u).sub(p.U);
+            nom = nom.mul(p.U.add(x).div(L).pow(K));
+            {
+                K.mul(p.u).gt(p.U.sub(p.u))
+                    ? nom = nom.sub(K.mul(p.u).add(p.u).sub(p.U).mul(p.U.div(L).pow(K)))
+                    : nom = nom.add(p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K)));
+            }
             nom = nom.mul(p.S.add(p.U));
 
-            UD60x18 denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
+            SD59x18 denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
 
-            fee = BASE_FEE.mul(x).add(nom.div(denom)).unwrap();
+            fee = uint256(BASE_FEE.mul(x).add(nom.div(denom)).unwrap());
 
             fee = fee >= amount ? amount : fee;
         }
@@ -446,8 +451,8 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         return Registry(registry).isTenderizer(asset) && Tenderizer(asset).asset() == address(underlying);
     }
 
-    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (UD60x18 r) {
-        r = ud(unlocking).div(ud(liabilities));
+    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (SD59x18 r) {
+        r = sd(int256(unlocking)).div(sd(int256(liabilities)));
     }
 
     function _unlock(address asset, uint256 amount, uint256 fee) internal {
@@ -475,13 +480,13 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
      * @notice Since the LSTs to be exchanged are aTokens, and thus have a rebasing supply,
      * we need to update the supplies upon a swap to correctly determine the spread of the asset.
      */
-    function _checkSupply(address tenderizer) internal view returns (UD60x18 s, UD60x18 S) {
+    function _checkSupply(address tenderizer) internal view returns (SD59x18 s, SD59x18 S) {
         Data storage $ = _loadStorageSlot();
 
         S = $.S;
 
-        s = ud(Tenderizer(tenderizer).totalSupply());
-        UD60x18 oldSupply = $.lastSupplyForAsset[tenderizer];
+        s = sd(int256(Tenderizer(tenderizer).totalSupply()));
+        SD59x18 oldSupply = $.lastSupplyForAsset[tenderizer];
 
         if (oldSupply.lt(s)) {
             S = S.add(s.sub(oldSupply));

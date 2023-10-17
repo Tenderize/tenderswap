@@ -421,9 +421,7 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
 
         {
             SD59x18 nom = p.u.add(x);
-            nom = nom.mul(K);
-
-            nom = nom.add(p.u).sub(p.U);
+            nom = nom.mul(K).sub(p.U).add(p.u);
             nom = nom.mul(p.U.add(x).div(L).pow(K));
             {
                 K.mul(p.u).gt(p.U.sub(p.u))

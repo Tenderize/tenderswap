@@ -17,16 +17,24 @@ contract Add_Liquidity is Script {
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        TenderSwap swap = TenderSwap(0x3ADdb29D60fE684f1B773527cB7eCF17223C3b82);
-        // ERC20(underlying).approve(address(swap), 200_000 ether);
-        // swap.deposit(200_000 ether);
+        TenderSwap swap = TenderSwap(0x4ec6faD51A1957cAb7E8a62e43f0A0a0c2143d3f);
+        ERC20(underlying).approve(address(swap), 500_000 ether);
+        swap.deposit(500_000 ether);
         console2.log("liabilities", swap.liabilities());
         console2.log("liquidity", swap.liquidity());
         // ERC20(0x2eaC4210B90D13666f7E88635096BdC17C51FB70).approve(address(swap), 10 ether);
-        (uint256 out, uint256 fee) = swap.quote(0x2eaC4210B90D13666f7E88635096BdC17C51FB70, 10 ether);
-        console2.log("quote", out);
 
-        // swap.swap(0x2eaC4210B90D13666f7E88635096BdC17C51FB70, 10 ether, 0);
+        // (uint256 out, uint256 fee) = swap.quote(0x2eaC4210B90D13666f7E88635096BdC17C51FB70, 10 ether);
+        // console2.log("quote", out);
+        // ERC20(0x2eaC4210B90D13666f7E88635096BdC17C51FB70).approve(address(swap), 10 ether);
+        // // (out, fee) = swap.swap(0x2eaC4210B90D13666f7E88635096BdC17C51FB70, 10 ether, 0);
+        // console2.log("out", out);
+        // console2.log("fee", fee);
+
+        // // Other Tenderizer: 0xD58Fed21106A046093086903909478AD96D310a8
+        // (out, fee) = swap.quote(0xD58Fed21106A046093086903909478AD96D310a8, 10 ether);
+        // console2.log("quote", out);
+
         vm.stopBroadcast();
     }
 }

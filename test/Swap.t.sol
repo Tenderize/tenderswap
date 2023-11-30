@@ -12,16 +12,21 @@
 pragma solidity >=0.8.19;
 
 import { Test, console } from "forge-std/Test.sol";
+import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { MockERC20 } from "test/helpers/MockERC20.sol";
+
+import { Adapter } from "@tenderize/stake/adapters/Adapter.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 
-import { TenderSwap, Config, BASE_FEE, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, Config, BASE_FEE, RELAYER_CUT, MIN_LP_CUT, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
 import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
+import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/ud60x18.sol";
 
 import { SwapHarness } from "./Swap.harness.sol";
+import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
 import { acceptableDelta } from "./helpers/Utils.sol";
 
@@ -34,6 +39,7 @@ contract TenderSwapTest is Test {
 
     address registry;
     address unlocks;
+    address adapter;
 
     address addr1;
     address addr2;
@@ -45,6 +51,7 @@ contract TenderSwapTest is Test {
 
         registry = vm.addr(123);
         unlocks = vm.addr(567);
+        adapter = vm.addr(789);
 
         addr1 = vm.addr(111);
         addr2 = vm.addr(222);
@@ -88,6 +95,130 @@ contract TenderSwapTest is Test {
         assertEq(swap.lpToken().balanceOf(addr1), deposit1, "addr1 lpToken balance");
         assertEq(swap.lpToken().balanceOf(addr2), expBalY, "addr2 lpToken balance");
         assertEq(underlying.balanceOf(address(swap)), deposit1 + deposit2, "TenderSwap underlying balance");
+    }
+
+    // write end to end swap test with checking the queue
+    // make three swaps, check the queue state (check head and tail)
+    // buy up the last unlock and check all code paths
+    // * mock unlocks as ERC721 mock transfer
+    // process blocks and redeem the first unlock and check all code paths
+    // * mock Tenderizer.withdraw()
+    // check that queue is now only containing the second unlock
+    // * Mock Tenderizer.unlock() and Tenderizer.unlockMaturity()
+
+    function test_scenario_full() public {
+        uint256 unlockTime = 100;
+        tToken0.mint(address(this), 10_000 ether);
+        tToken0.approve(address(swap), 10_000 ether);
+
+        // 1. Deposit Liquidity
+        uint256 liquidity = 100 ether;
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity);
+
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(TenderizerImmutableArgs.adapter.selector), abi.encode(adapter));
+
+        // 2. Make 3 swaps
+        uint256 amount = 10 ether;
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(1));
+        vm.mockCall(
+            address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 1), abi.encode(block.number + unlockTime)
+        );
+        swap.swap(address(tToken0), 10 ether, 0 ether);
+
+        uint256 unlockBlockOne = block.number;
+        uint256 unlockBlockTwo = block.number + 1;
+        uint256 unlockBlockThree = block.number + 2;
+
+        vm.roll(unlockBlockTwo);
+        amount = 20 ether;
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(2));
+        vm.mockCall(
+            address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 2), abi.encode(block.number + unlockTime)
+        );
+        swap.swap(address(tToken0), 20 ether, 0 ether);
+
+        vm.roll(unlockBlockThree);
+        amount = 30 ether;
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(3));
+        vm.mockCall(
+            address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 3), abi.encode(block.number + unlockTime)
+        );
+        swap.swap(address(tToken0), 30 ether, 0 ether);
+
+        // 3. Check queue state
+        UnlockQueue.Item memory head = swap.oldestUnlock();
+        assertEq(head.id, _encodeTokenId(address(tToken0), 1), "head id");
+        assertEq(head.amount, 10 ether, "head amount");
+        assertEq(head.maturity, unlockBlockOne + unlockTime, "head maturity");
+
+        UnlockQueue.Node memory middleUnlock = swap.exposed_queueQuery(_encodeTokenId(address(tToken0), 2));
+        assertEq(middleUnlock.prev, _encodeTokenId(address(tToken0), 1), "middleUnlock prev");
+        assertEq(middleUnlock.next, _encodeTokenId(address(tToken0), 3), "middleUnlock next");
+        assertEq(middleUnlock.data.id, _encodeTokenId(address(tToken0), 2), "middleUnlock id");
+        assertEq(middleUnlock.data.amount, 20 ether, "middleUnlock amount");
+        assertEq(middleUnlock.data.maturity, unlockBlockTwo + unlockTime, "middleUnlock maturity");
+
+        UnlockQueue.Item memory tail = swap.newestUnlock();
+        assertEq(tail.id, _encodeTokenId(address(tToken0), 3), "tail id");
+        assertEq(tail.amount, 30 ether, "tail amount");
+        assertEq(tail.maturity, unlockBlockThree + unlockTime, "tail maturity");
+
+        // 4. Buy up the last unlock
+        uint256 currentTime = unlockBlockThree + 50;
+        vm.mockCall(adapter, abi.encodeWithSelector(Adapter.currentTime.selector), abi.encode(currentTime));
+        vm.mockCall(adapter, abi.encodeWithSelector(Adapter.unlockTime.selector), abi.encode(unlockTime));
+
+        vm.mockCall(
+            unlocks,
+            abi.encodeWithSignature(
+                "safeTransferFrom(address,address,uint256)", address(swap), address(this), _encodeTokenId(address(tToken0), 3)
+            ),
+            abi.encode(true)
+        );
+        underlying.mint(address(this), 30 ether);
+        underlying.approve(address(swap), 30 ether);
+        // console.log("fee %s", tail.fee);
+        // console.log("lp cut %s", uint256(unwrap(sd(int256(uint256(tail.fee))).mul(sd(0.1e18)))));
+        // console.log("maturity %s", tail.maturity);
+        // console.log("block num %s", block.number);
+
+        uint256 liabilitiesBefore = swap.liabilities();
+        {
+            // buy unlock 3
+            assertEq(swap.buyUnlock(), _encodeTokenId(address(tToken0), 3), "bought id");
+            UD60x18 tailFee = ud(tail.fee);
+            UD60x18 baseReward = tailFee.sub(tailFee.mul(MIN_LP_CUT));
+            UD60x18 timeLeft = ud(tail.maturity - currentTime);
+            UD60x18 unlockTimex18 = ud(unlockTime);
+            UD60x18 progress = timeLeft.div(unlockTimex18);
+            assertEq(swap.liabilities(), liabilitiesBefore + tailFee.sub(baseReward.mul(progress)).unwrap(), "liabilities");
+            // sanity check that the LP cut is half of the baseReward plus the LP cut
+            assertEq(
+                swap.liabilities(), liabilitiesBefore + tailFee.sub(baseReward.div(ud(2e18))).unwrap(), "liabilities sanity check"
+            );
+        }
+        assertEq(swap.exposed_unlocking(), 20 ether + 10 ether, "unlocking");
+        assertEq(swap.exposed_unlockingForAsset(address(tToken0)), 20 ether + 10 ether, "unlocking for asset");
+        head = swap.oldestUnlock();
+        assertEq(head.id, _encodeTokenId(address(tToken0), 1), "head id");
+        tail = swap.newestUnlock();
+        assertEq(tail.id, _encodeTokenId(address(tToken0), 2), "tail id");
+
+        // 5. Redeem the first unlock
+        vm.roll(unlockBlockOne + unlockTime);
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.withdraw.selector, address(swap), 1), abi.encode(10 ether));
+        liabilitiesBefore = swap.liabilities();
+        swap.redeemUnlock();
+        assertEq(swap.liabilities(), liabilitiesBefore + ud(head.fee).sub(ud(head.fee).mul(RELAYER_CUT)).unwrap(), "liabilities");
+        assertEq(swap.getPendingRelayerRewards(address(this)), ud(head.fee).mul(RELAYER_CUT).unwrap(), "relayer rewards");
+        assertEq(swap.exposed_unlocking(), 20 ether, "unlocking"); // unlock 2 remains
+        assertEq(swap.exposed_unlockingForAsset(address(tToken0)), 20 ether, "unlocking for asset"); // unlock 2 remains
+        head = swap.oldestUnlock();
+        assertEq(head.id, _encodeTokenId(address(tToken0), 2), "head id");
+        tail = swap.newestUnlock();
+        assertEq(tail.id, _encodeTokenId(address(tToken0), 2), "tail id");
     }
 
     function test_swap() public {

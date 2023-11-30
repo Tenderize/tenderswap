@@ -10,11 +10,13 @@
 // Copyright (c) Tenderize Labs Ltd
 
 import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
+import { UD60x18, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
+import { Adapter } from "@tenderize/stake/adapters/Adapter.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
-import { Tenderizer } from "@tenderize/stake/tenderizer/Tenderizer.sol";
+import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 import { Unlocks } from "@tenderize/stake/unlocks/Unlocks.sol";
 import { SafeCastLib } from "solmate/utils/SafeCastLib.sol";
 
@@ -29,8 +31,8 @@ pragma solidity >=0.8.19;
 // TODO: UUPS upgradeable
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
-SD59x18 constant RELAYER_CUT = SD59x18.wrap(0.1e18);
-SD59x18 constant MIN_LP_CUT = SD59x18.wrap(0.1e18);
+UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
+UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
 SD59x18 constant K = SD59x18.wrap(3e18);
 
 struct Config {
@@ -143,6 +145,26 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     }
 
     /**
+     * @notice Current oldest unlock in the queue
+     * @dev returns a struct with zero values if queue is empty
+     * @return unlock UnlockQueue.Item struct
+     */
+    function oldestUnlock() public view returns (UnlockQueue.Item memory) {
+        Data storage $ = _loadStorageSlot();
+        return $.unlockQ.head().data;
+    }
+
+    /**
+     * @notice Current newest unlock in the queue
+     * @dev returns a struct with zero values if queue is empty
+     * @return unlock UnlockQueue.Item struct
+     */
+    function newestUnlock() public view returns (UnlockQueue.Item memory) {
+        Data storage $ = _loadStorageSlot();
+        return $.unlockQ.tail().data;
+    }
+
+    /**
      * @notice Deposit liquidity into the pool, receive liquidity pool shares in return.
      * The liquidity pool shares represent an amount of liabilities owed to the liquidity provider.
      * @param amount Amount of liquidity to deposit
@@ -209,6 +231,16 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         underlying.safeTransfer(msg.sender, relayerReward);
 
         emit RelayerRewardsClaimed(msg.sender, relayerReward);
+    }
+
+    /**
+     * @notice Check outstanding rewards for a relayer.
+     * @param relayer Address of the relayer
+     * @return relayerReward Amount of tokens that can be claimed
+     */
+    function getPendingRelayerRewards(address relayer) external view returns (uint256) {
+        Data storage $ = _loadStorageSlot();
+        return $.relayerFees[relayer];
     }
 
     /**
@@ -296,14 +328,24 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         if ($.recovery > 0) revert RecoveryMode();
 
         // get newest item from unlock queue
-        UnlockQueue.Item memory unlock = $.unlockQ.popBack();
+        UnlockQueue.Item memory unlock = $.unlockQ.popTail().data;
 
         // revert if unlock at maturity
-        if (unlock.maturity <= block.timestamp) revert UnlockNotMature(unlock.maturity, block.timestamp);
+        tokenId = unlock.id;
+        (address tenderizer,) = _decodeTokenId(tokenId);
+        Adapter adapter = Tenderizer(tenderizer).adapter();
+        uint256 time = adapter.currentTime();
+        if (unlock.maturity <= time) revert UnlockAlreadyMature(unlock.maturity, block.timestamp);
 
-        // calculate reward after decay, take base fee cut for LPs
-        uint256 reward =
-            (unlock.fee - uint256(unwrap(sd(int256(uint256(unlock.fee))).mul(MIN_LP_CUT)))) * unlock.maturity / block.timestamp;
+        // Calculate the reward for purchasing the unlock
+        // The base reward is the fee minus the MIN_LP_CUT going to liquidity providers
+        // The base reward then further decays as time to maturity decreases
+        uint256 reward;
+        {
+            UD60x18 progress = ud(unlock.maturity - time).div(ud(adapter.unlockTime()));
+            UD60x18 fee60x18 = ud(unlock.fee);
+            reward = fee60x18.sub(fee60x18.mul(MIN_LP_CUT)).mul(UNIT_60x18.sub(progress)).unwrap();
+        }
 
         // Update pool state
         // - update unlocking
@@ -311,8 +353,6 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         // - Update liabilities to distribute LP rewards
         $.liabilities += unlock.fee - reward;
 
-        tokenId = unlock.id;
-        (address tenderizer,) = _decodeTokenId(tokenId);
         uint256 ufa = $.unlockingForAsset[tenderizer] - unlock.amount;
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
@@ -341,17 +381,15 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         Data storage $ = _loadStorageSlot();
 
         // get oldest item from unlock queue
-        UnlockQueue.Item memory unlock = $.unlockQ.popFront();
-
-        // revert if unlock *not* at maturity
-        if (unlock.maturity > block.timestamp) revert UnlockNotMature(unlock.maturity, block.timestamp);
+        UnlockQueue.Item memory unlock = $.unlockQ.popHead().data;
 
         // withdraw the unlock (returns amount withdrawn)
         (address tenderizer, uint96 id) = _decodeTokenId(unlock.id);
+        // this will revert if unlock is not at maturity
         uint256 amountReceived = Tenderizer(tenderizer).withdraw(address(this), id);
 
         //calculate the relayer reward
-        uint256 relayerReward = uint256(unwrap(sd(int256(uint256(unlock.fee))).mul(RELAYER_CUT)));
+        uint256 relayerReward = ud(unlock.fee).mul(RELAYER_CUT).unwrap();
         // update relayer rewards
         $.relayerFees[msg.sender] += relayerReward;
 
@@ -418,24 +456,24 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
 
         SD59x18 x = sd(int256(amount));
         SD59x18 L = sd(int256($.liabilities));
+        SD59x18 nom;
+        SD59x18 denom;
 
         {
-            SD59x18 nom = p.u.add(x);
-            nom = nom.mul(K).sub(p.U).add(p.u);
-            nom = nom.mul(p.U.add(x).div(L).pow(K));
-            {
-                K.mul(p.u).gt(p.U.sub(p.u))
-                    ? nom = nom.sub(K.mul(p.u).add(p.u).sub(p.U).mul(p.U.div(L).pow(K)))
-                    : nom = nom.add(p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K)));
-            }
-            nom = nom.mul(p.S.add(p.U));
+            SD59x18 sumA = p.u.add(x);
+            sumA = sumA.mul(K).sub(p.U).add(p.u);
+            sumA = sumA.mul(p.U.add(x).div(L).pow(K));
 
-            SD59x18 denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
+            SD59x18 sumB = p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K));
 
-            fee = uint256(BASE_FEE.mul(x).add(nom.div(denom)).unwrap());
+            nom = sumA.add(sumB).mul(p.S.add(p.U));
 
-            fee = fee >= amount ? amount : fee;
+            denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
         }
+        SD59x18 baseFee = BASE_FEE.mul(x);
+        fee = uint256(baseFee.add(nom.div(denom)).unwrap());
+
+        fee = fee >= amount ? amount : fee;
         unchecked {
             out = amount - fee;
         }

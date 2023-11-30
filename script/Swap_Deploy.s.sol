@@ -9,7 +9,7 @@ contract Swap_Deploy is Script {
     // Contracts are deployed deterministically.
     // e.g. `foo = new Foo{salt: salt}(constructorArgs)`
     // The presence of the salt argument tells forge to use https://github.com/Arachnid/deterministic-deployment-proxy
-    bytes32 private constant salt = 0x0;
+    bytes32 private constant salt = bytes32(uint256(1));
 
     // Start broadcasting with private key from `.env` file
     uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");

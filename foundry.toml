@@ -35,6 +35,7 @@ wrap_comments = true
 # sepolia = { key = "${API_KEY_ETHERSCAN}" }
 
 # [rpc_endpoints]
+arbitrum_goerli = "${ARBITRUM_GOERLI_RPC}"
 # arbitrum_one = "https://arbitrum-mainnet.infura.io/v3/${API_KEY_INFURA}"
 # avalanche = "https://avalanche-mainnet.infura.io/v3/${API_KEY_INFURA}"
 # bnb_smart_chain = "https://bsc-dataseed.binance.org"

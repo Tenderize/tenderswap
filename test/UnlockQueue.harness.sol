@@ -24,19 +24,19 @@ contract UnlockQueueHarness {
         queue.push(item);
     }
 
-    function exposed_popFront() public returns (UnlockQueue.Item memory item) {
-        item = queue.popFront();
+    function exposed_popHead() public returns (UnlockQueue.Node memory node) {
+        node = queue.popHead();
     }
 
-    function exposed_popBack() public returns (UnlockQueue.Item memory item) {
-        item = queue.popBack();
+    function exposed_popTail() public returns (UnlockQueue.Node memory node) {
+        node = queue.popTail();
     }
 
-    function exposed_head() public view returns (UnlockQueue.Item memory item) {
-        item = queue.nodes[queue.head].data;
+    function exposed_head() public view returns (UnlockQueue.Node memory node) {
+        node = queue.nodes[queue._head];
     }
 
-    function exposed_tail() public view returns (UnlockQueue.Item memory item) {
-        item = queue.nodes[queue.tail].data;
+    function exposed_tail() public view returns (UnlockQueue.Node memory node) {
+        node = queue.nodes[queue._tail];
     }
 }

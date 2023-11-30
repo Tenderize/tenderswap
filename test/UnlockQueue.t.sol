@@ -30,28 +30,34 @@ contract UnlockQueueTest is Test {
         queue.exposed_push(item1);
 
         // assert
-        assertEq(queue.exposed_head().id, 1);
-        assertEq(queue.exposed_tail().id, 1);
+        assertEq(queue.exposed_head().data.id, 1);
+        assertEq(queue.exposed_tail().data.id, 1);
 
         queue.exposed_push(item2);
         // assert
-        assertEq(queue.exposed_head().id, 1);
-        assertEq(queue.exposed_tail().id, 2);
+        assertEq(queue.exposed_head().data.id, 1);
+        assertEq(queue.exposed_head().prev, 0);
+        assertEq(queue.exposed_head().next, 2);
+        assertEq(queue.exposed_tail().data.id, 2);
 
         queue.exposed_push(item3);
         // assert
-        assertEq(queue.exposed_head().id, 1);
-        assertEq(queue.exposed_tail().id, 3);
+        assertEq(queue.exposed_head().data.id, 1);
+        assertEq(queue.exposed_head().prev, 0);
+        assertEq(queue.exposed_head().next, 2);
+        assertEq(queue.exposed_tail().data.id, 3);
+        assertEq(queue.exposed_tail().prev, 2);
+        assertEq(queue.exposed_tail().next, 0);
 
         // pop front
-        UnlockQueue.Item memory popped = queue.exposed_popFront();
-        assertEq(popped.id, 1);
-        assertEq(queue.exposed_head().id, 2);
+        UnlockQueue.Node memory popped = queue.exposed_popHead();
+        assertEq(popped.data.id, 1);
+        assertEq(queue.exposed_head().data.id, 2);
 
         // pop back
-        popped = queue.exposed_popBack();
-        assertEq(popped.id, 3);
-        assertEq(queue.exposed_head().id, 2);
-        assertEq(queue.exposed_tail().id, 2);
+        popped = queue.exposed_popTail();
+        assertEq(popped.data.id, 3);
+        assertEq(queue.exposed_head().data.id, 2);
+        assertEq(queue.exposed_tail().data.id, 2);
     }
 }

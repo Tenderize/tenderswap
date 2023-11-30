@@ -34,41 +34,45 @@ library UnlockQueue {
     }
 
     struct Data {
-        uint256 head; // oldest element
-        uint256 tail; // newest element
+        uint256 _head; // oldest element
+        uint256 _tail; // newest element
         mapping(uint256 index => Node) nodes; // elements as a map
     }
 
     /**
-     * @notice returns the oldest element in the queue
+     * @notice Get the oldest element in the queue
+     * @param q The queue to query
+     * @return The oldest element in the queue
      */
-    function head(UnlockQueue.Data storage q) internal view returns (Item memory) {
-        return q.nodes[q.head].data;
+    function head(UnlockQueue.Data storage q) internal view returns (Node memory) {
+        return q.nodes[q._head];
     }
 
     /**
-     * @notice returns the newest element in the queue
+     * @notice Get the newest element in the queue
+     * @param q The queue to query
+     * @return The newest element in the queue
      */
-    function tail(UnlockQueue.Data storage q) internal view returns (Item memory) {
-        return q.nodes[q.tail].data;
+    function tail(UnlockQueue.Data storage q) internal view returns (Node memory) {
+        return q.nodes[q._tail];
     }
 
     /**
      * @notice Pop the oldest element from the queue
      * @param q The queue to pop from
      */
-    function popFront(UnlockQueue.Data storage q) internal returns (Item memory unlock) {
-        uint256 head = q.head;
+    function popHead(UnlockQueue.Data storage q) internal returns (Node memory node) {
+        uint256 head = q._head;
         if (head == 0) revert QueueEmpty();
 
-        unlock = q.nodes[head].data;
+        node = q.nodes[head];
 
         uint256 next = q.nodes[head].next;
         if (next == 0) {
-            q.head = 0;
-            q.tail = 0;
+            q._head = 0;
+            q._tail = 0;
         } else {
-            q.head = next;
+            q._head = next;
             q.nodes[next].prev = 0;
         }
 
@@ -79,18 +83,18 @@ library UnlockQueue {
      * @notice Pop the newest element from the queue
      * @param q The queue to pop from
      */
-    function popBack(UnlockQueue.Data storage q) internal returns (Item memory unlock) {
-        uint256 tail = q.tail;
+    function popTail(UnlockQueue.Data storage q) internal returns (Node memory node) {
+        uint256 tail = q._tail;
         if (tail == 0) revert QueueEmpty();
 
-        unlock = q.nodes[tail].data;
+        node = q.nodes[tail];
 
         uint256 prev = q.nodes[tail].prev;
         if (prev == 0) {
-            q.head = 0;
-            q.tail = 0;
+            q._head = 0;
+            q._tail = 0;
         } else {
-            q.tail = prev;
+            q._tail = prev;
             q.nodes[prev].next = 0;
         }
 
@@ -100,22 +104,21 @@ library UnlockQueue {
     /**
      * @notice Push a new element to the back of the queue
      * @param q The queue to push to
-     * @param id The id of the unlock
      * @param unlock The unlock data to push
      */
-    function push(UnlockQueue.Data storage q, uint256 id, Item memory unlock) internal {
-        uint256 tail = q.tail;
-        uint256 newTail = id;
+    function push(UnlockQueue.Data storage q, Item memory unlock) internal {
+        uint256 tail = q._tail;
+        uint256 newTail = unlock.id;
 
         q.nodes[newTail].data = unlock;
         q.nodes[newTail].prev = tail;
 
         if (tail == 0) {
-            q.head = newTail;
+            q._head = newTail;
         } else {
             q.nodes[tail].next = newTail;
         }
 
-        q.tail = newTail;
+        q._tail = newTail;
     }
 }

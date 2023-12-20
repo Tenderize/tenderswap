@@ -24,6 +24,11 @@ contract SwapHarness is TenderSwap {
         $.liabilities = _liabilities;
     }
 
+    function exposed_setRelayerRewards(uint256 amount, address account) public {
+        Data storage $ = _loadStorageSlot();
+        $.relayerRewards[account] = amount;
+    }
+
     function exposed_queueQuery(uint256 index) public view returns (UnlockQueue.Node memory) {
         Data storage $ = _loadStorageSlot();
         return $.unlockQ.nodes[index];

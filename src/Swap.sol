@@ -67,7 +67,7 @@ abstract contract SwapStorage {
         // last supply of a tenderizer when seen, tracked because they are rebasing tokens
         mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
         // relayer fees
-        mapping(address relayer => uint256 fee) relayerFees;
+        mapping(address relayer => uint256 reward) relayerRewards;
     }
 
     function _loadStorageSlot() internal pure returns (Data storage $) {
@@ -224,9 +224,9 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     function claimRelayerRewards() public returns (uint256 relayerReward) {
         Data storage $ = _loadStorageSlot();
 
-        relayerReward = $.relayerFees[msg.sender];
+        relayerReward = $.relayerRewards[msg.sender];
 
-        delete $.relayerFees[msg.sender];
+        delete $.relayerRewards[msg.sender];
 
         underlying.safeTransfer(msg.sender, relayerReward);
 
@@ -238,9 +238,9 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
      * @param relayer Address of the relayer
      * @return relayerReward Amount of tokens that can be claimed
      */
-    function getPendingRelayerRewards(address relayer) external view returns (uint256) {
+    function pendingRelayerRewards(address relayer) external view returns (uint256) {
         Data storage $ = _loadStorageSlot();
-        return $.relayerFees[relayer];
+        return $.relayerRewards[relayer];
     }
 
     /**
@@ -391,7 +391,7 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
         //calculate the relayer reward
         uint256 relayerReward = ud(unlock.fee).mul(RELAYER_CUT).unwrap();
         // update relayer rewards
-        $.relayerFees[msg.sender] += relayerReward;
+        $.relayerRewards[msg.sender] += relayerReward;
 
         uint256 fee = unlock.fee - relayerReward;
 

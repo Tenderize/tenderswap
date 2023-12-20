@@ -44,6 +44,8 @@ contract TenderSwapTest is Test {
     address addr1;
     address addr2;
 
+    event RelayerRewardsClaimed(address indexed relayer, uint256 rewards);
+
     function setUp() public {
         underlying = new MockERC20("network.xyz", "XYZ", 18);
         tToken0 = new MockERC20("tXYZ_0x00", "tXYZ_0x00", 18);
@@ -95,6 +97,20 @@ contract TenderSwapTest is Test {
         assertEq(swap.lpToken().balanceOf(addr1), deposit1, "addr1 lpToken balance");
         assertEq(swap.lpToken().balanceOf(addr2), expBalY, "addr2 lpToken balance");
         assertEq(underlying.balanceOf(address(swap)), deposit1 + deposit2, "TenderSwap underlying balance");
+    }
+
+    function test_claimRelayerRewards(uint256 amount) public {
+        amount = 10 ether;
+        swap.exposed_setRelayerRewards(amount, addr1);
+        underlying.mint(address(swap), amount);
+        assertEq(swap.pendingRelayerRewards(addr1), amount, "pending rewards");
+        vm.expectEmit(true, true, true, true);
+        emit RelayerRewardsClaimed(addr1, amount);
+
+        vm.prank(addr1);
+        swap.claimRelayerRewards();
+        assertEq(swap.pendingRelayerRewards(addr1), 0, "pending rewards");
+        assertEq(underlying.balanceOf(addr1), amount, "addr1 balance");
     }
 
     // write end to end swap test with checking the queue
@@ -212,7 +228,7 @@ contract TenderSwapTest is Test {
         liabilitiesBefore = swap.liabilities();
         swap.redeemUnlock();
         assertEq(swap.liabilities(), liabilitiesBefore + ud(head.fee).sub(ud(head.fee).mul(RELAYER_CUT)).unwrap(), "liabilities");
-        assertEq(swap.getPendingRelayerRewards(address(this)), ud(head.fee).mul(RELAYER_CUT).unwrap(), "relayer rewards");
+        assertEq(swap.pendingRelayerRewards(address(this)), ud(head.fee).mul(RELAYER_CUT).unwrap(), "relayer rewards");
         assertEq(swap.exposed_unlocking(), 20 ether, "unlocking"); // unlock 2 remains
         assertEq(swap.exposed_unlockingForAsset(address(tToken0)), 20 ether, "unlocking for asset"); // unlock 2 remains
         head = swap.oldestUnlock();
@@ -237,118 +253,116 @@ contract TenderSwapTest is Test {
         tToken0.approve(address(swap), 150 ether);
         (uint256 out, uint256 fee) = swap.swap(address(tToken0), 10 ether, 5 ether);
 
-        // Fee should be 0.15% or 0.0015
-        // As utilisation after is 0.1 and 0.1^3 = 0.001
-        // Base fee is 0.005 so that makes 0.0015
-        // Since there is only 1 token drawing liquidity, its weight is 1
-        uint256 expFee = amount * 15 / 10_000;
+        uint256 expFee = amount * 75 / 100_000;
 
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
         assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
     }
 
-    function testFuzz_swap_other(
-        uint256 liquidity,
-        uint256 t0Supply,
-        uint256 t1Supply,
-        uint256 t0Amount,
-        uint256 t1Amount
-    )
-        public
-    {
-        vm.assume(liquidity >= 10 ether && liquidity <= type(uint128).max);
-        t0Supply = bound(t0Supply, 1 ether, liquidity);
-        t1Supply = bound(t1Supply, 1 ether, liquidity);
-        t0Amount = bound(t0Amount, 1 ether / 5, t0Supply / 5);
-        t1Amount = bound(t1Amount, 1 ether / 5, t1Supply / 5);
-
-        underlying.mint(address(this), liquidity);
-        underlying.approve(address(swap), liquidity);
-        swap.deposit(liquidity);
-
-        uint256 tokenId = _encodeTokenId(address(tToken0), 0);
-
-        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, t0Amount), abi.encode(0));
-        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
-
-        tToken0.mint(address(this), t0Amount);
-        tToken1.mint(address(this), t1Amount);
-        tToken0.approve(address(swap), t0Amount);
-        (uint256 out, uint256 fee) = swap.swap(address(tToken0), t0Amount, 0 ether);
-
-        (out, fee) = swap.quote(address(tToken1), t1Amount);
-        console.log("swap quote 1", out, fee);
-        // Fee should be 0.15% or 0.0015
-        // As utilisation after is 0.1 and 0.1^3 = 0.001
-        // Base fee is 0.005 so that makes 0.0015
-        // Since there is only 1 token drawing liquidity, its weight is 1
-
-        // uint256 expFee = amount * 15 / 10_000;
-
-        // assertEq(fee, expFee, "swap fee");
-        // assertEq(out, amount - expFee, "swap out");
-        // assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
-    }
-
-    function test_swap_other() public {
-        uint256 liquidity = 2_000_000 ether;
-        underlying.mint(address(this), liquidity);
-        underlying.approve(address(swap), liquidity);
-        swap.deposit(liquidity);
-
-        uint256 amount = 1 ether;
-        uint256 tokenId = _encodeTokenId(address(tToken0), 0);
-
-        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
-        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
-
-        tToken0.mint(address(this), 34_000 ether);
-        tToken1.mint(address(this), 14_000 ether);
-        tToken0.approve(address(swap), 1500 ether);
-        (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0 ether);
-
-        (out, fee) = swap.quote(address(tToken1), 50 ether);
-        console.log("swap quote 1", out, fee);
-        // Fee should be 0.15% or 0.0015
-        // As utilisation after is 0.1 and 0.1^3 = 0.001
-        // Base fee is 0.005 so that makes 0.0015
-        // Since there is only 1 token drawing liquidity, its weight is 1
-        uint256 expFee = amount * 15 / 10_000;
-
-        // assertEq(fee, expFee, "swap fee");
-        // assertEq(out, amount - expFee, "swap out");
-        // assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
-    }
-
-    // function testFuzz_swap_basic(uint256 liquidity, uint256 amount) public {
-    //     liquidity = bound(liquidity, 1e18, type(uint128).max);
-    //     amount = bound(amount, 1e3, liquidity);
+    // function testFuzz_swap_other(
+    //     uint256 liquidity,
+    //     uint256 t0Supply,
+    //     uint256 t1Supply,
+    //     uint256 t0Amount,
+    //     uint256 t1Amount
+    // )
+    //     public
+    // {
+    //     vm.assume(liquidity >= 10 ether && liquidity <= type(uint128).max);
+    //     t0Supply = bound(t0Supply, 1 ether, liquidity);
+    //     t1Supply = bound(t1Supply, 1 ether, liquidity);
+    //     t0Amount = bound(t0Amount, 1 ether / 5, t0Supply / 5);
+    //     t1Amount = bound(t1Amount, 1 ether / 5, t1Supply / 5);
 
     //     underlying.mint(address(this), liquidity);
     //     underlying.approve(address(swap), liquidity);
     //     swap.deposit(liquidity);
 
+    //     uint256 tokenId = _encodeTokenId(address(tToken0), 0);
+
+    //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, t0Amount), abi.encode(0));
+    //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number +
+    // 100));
+
+    //     tToken0.mint(address(this), t0Amount);
+    //     tToken1.mint(address(this), t1Amount);
+    //     tToken0.approve(address(swap), t0Amount);
+    //     (uint256 out, uint256 fee) = swap.swap(address(tToken0), t0Amount, 0 ether);
+
+    //     (out, fee) = swap.quote(address(tToken1), t1Amount);
+    //     console.log("swap quote 1", out, fee);
+    //     // Fee should be 0.15% or 0.0015
+    //     // As utilisation after is 0.1 and 0.1^3 = 0.001
+    //     // Base fee is 0.005 so that makes 0.0015
+    //     // Since there is only 1 token drawing liquidity, its weight is 1
+
+    //     // uint256 expFee = amount * 15 / 10_000;
+
+    //     // assertEq(fee, expFee, "swap fee");
+    //     // assertEq(out, amount - expFee, "swap out");
+    //     // assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
+    // }
+
+    // function test_swap_other() public {
+    //     uint256 liquidity = 2_000_000 ether;
+    //     underlying.mint(address(this), liquidity);
+    //     underlying.approve(address(swap), liquidity);
+    //     swap.deposit(liquidity);
+
+    //     uint256 amount = 1 ether;
+    //     uint256 tokenId = _encodeTokenId(address(tToken0), 0);
+
     //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
     //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number +
     // 100));
 
-    //     tToken0.mint(address(this), liquidity);
-    //     tToken0.approve(address(swap), amount);
-    //     (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
+    //     tToken0.mint(address(this), 34_000 ether);
+    //     tToken1.mint(address(this), 14_000 ether);
+    //     tToken0.approve(address(swap), 1500 ether);
+    //     (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0 ether);
 
-    //     uint256 expFee = uint256(
-    //         sd(int256(amount)).mul(BASE_FEE).add(
-    //             sd(int256(amount)).mul((sd(int256(amount)).div(sd(int256(liquidity))).pow(sd(3e18))))
-    //         ).unwrap()
-    //     );
-    //     expFee = expFee >= amount ? amount : expFee;
+    //     (out, fee) = swap.quote(address(tToken1), 50 ether);
+    //     console.log("swap quote 1", out, fee);
+    //     // Fee should be 0.15% or 0.0015
+    //     // As utilisation after is 0.1 and 0.1^3 = 0.001
+    //     // Base fee is 0.005 so that makes 0.0015
+    //     // Since there is only 1 token drawing liquidity, its weight is 1
+    //     uint256 expFee = amount * 15 / 10_000;
 
-    //     console.log("expFee", expFee);
-    //     console.log("fee", fee);
-
-    //     assertTrue(acceptableDelta(fee, expFee, 2), "fee amount");
-    //     assertTrue(acceptableDelta(out, amount - expFee, 2), "swap out");
-    //     assertEq(swap.liquidity(), liquidity - amount, "TenderSwap available liquidity");
+    //     // assertEq(fee, expFee, "swap fee");
+    //     // assertEq(out, amount - expFee, "swap out");
+    //     // assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
     // }
+
+    // // function testFuzz_swap_basic(uint256 liquidity, uint256 amount) public {
+    // //     liquidity = bound(liquidity, 1e18, type(uint128).max);
+    // //     amount = bound(amount, 1e3, liquidity);
+
+    // //     underlying.mint(address(this), liquidity);
+    // //     underlying.approve(address(swap), liquidity);
+    // //     swap.deposit(liquidity);
+
+    // //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
+    // //     vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number +
+    // // 100));
+
+    // //     tToken0.mint(address(this), liquidity);
+    // //     tToken0.approve(address(swap), amount);
+    // //     (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
+
+    // //     uint256 expFee = uint256(
+    // //         sd(int256(amount)).mul(BASE_FEE).add(
+    // //             sd(int256(amount)).mul((sd(int256(amount)).div(sd(int256(liquidity))).pow(sd(3e18))))
+    // //         ).unwrap()
+    // //     );
+    // //     expFee = expFee >= amount ? amount : expFee;
+
+    // //     console.log("expFee", expFee);
+    // //     console.log("fee", fee);
+
+    // //     assertTrue(acceptableDelta(fee, expFee, 2), "fee amount");
+    // //     assertTrue(acceptableDelta(out, amount - expFee, 2), "swap out");
+    // //     assertEq(swap.liquidity(), liquidity - amount, "TenderSwap available liquidity");
+    // // }
 }

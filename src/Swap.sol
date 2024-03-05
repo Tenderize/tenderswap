@@ -20,6 +20,10 @@ import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer
 import { Unlocks } from "@tenderize/stake/unlocks/Unlocks.sol";
 import { SafeCastLib } from "solmate/utils/SafeCastLib.sol";
 
+import { OwnableUpgradeable } from "openzeppelin-contracts-upgradeable/access/OwnableUpgradeable.sol";
+import { Initializable } from "openzeppelin-contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "openzeppelin-contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
 import { Multicall } from "@tenderize/swap/util/Multicall.sol";
 import { SelfPermit } from "@tenderize/swap/util/SelfPermit.sol";
 import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
@@ -29,6 +33,7 @@ import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 pragma solidity >=0.8.19;
 
 // TODO: UUPS upgradeable
+// TODO: fix '_utilisation' to use UD60x18
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
@@ -80,7 +85,7 @@ abstract contract SwapStorage {
     }
 }
 
-contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
+contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     using SafeTransferLib for ERC20;
     using SafeCastLib for uint256;
     using UnlockQueue for UnlockQueue.Data;
@@ -104,11 +109,18 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
     address private immutable registry;
     address private immutable unlocks;
 
+    function intialize() public initializer {
+        __Ownable_init();
+        __UUPSUpgradeable_init();
+    }
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(Config memory config) {
         lpToken = new LPToken(config.underlying.name(), config.underlying.symbol());
         underlying = config.underlying;
         registry = config.registry;
         unlocks = config.unlocks;
+        _disableInitializers();
     }
 
     modifier supplyUpdateHook(address asset) {
@@ -545,6 +557,10 @@ contract TenderSwap is SwapStorage, Multicall, SelfPermit, ERC721Receiver {
 
         return amount * supply / $.liabilities;
     }
+
+    ///@dev required by the OZ UUPS module
+    // solhint-disable-next-line no-empty-blocks
+    function _authorizeUpgrade(address) internal override onlyOwner { }
 }
 
 function _encodeTokenId(address tenderizer, uint96 id) pure returns (uint256) {

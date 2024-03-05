@@ -17,7 +17,7 @@ contract Add_Liquidity is Script {
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        TenderSwap swap = TenderSwap(0x4ec6faD51A1957cAb7E8a62e43f0A0a0c2143d3f);
+        TenderSwap swap = TenderSwap(0x2C7b29B0d07276bA2DF4abE02E9A38b5693af9c6);
         ERC20(underlying).approve(address(swap), 500_000 ether);
         swap.deposit(500_000 ether);
         console2.log("liabilities", swap.liabilities());

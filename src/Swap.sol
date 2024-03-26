@@ -38,11 +38,13 @@ error InvalidAsset(address asset);
 error SlippageThresholdExceeded(uint256 out, uint256 minOut);
 error InsufficientAssets(uint256 requested, uint256 available);
 error RecoveryMode();
+error WithdrawalCooldown(uint256 lpSharesRequested, uint256 lpSharesAvailable);
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
 UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
 SD59x18 constant K = SD59x18.wrap(3e18);
+uint64 constant COOLDOWN = 1 days;
 
 struct Config {
     ERC20 underlying;
@@ -55,6 +57,11 @@ struct SwapParams {
     SD59x18 U;
     SD59x18 s;
     SD59x18 S;
+}
+
+struct LastDeposit {
+    uint192 amount;
+    uint64 timestamp;
 }
 
 abstract contract SwapStorage {
@@ -77,6 +84,8 @@ abstract contract SwapStorage {
         mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 reward) relayerRewards;
+        // last deposits (used to check cooldown)
+        mapping(address => LastDeposit) lastDeposit;
     }
 
     function _loadStorageSlot() internal pure returns (Data storage $) {
@@ -183,6 +192,20 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     function deposit(uint256 amount, uint256 minLpShares) external returns (uint256 lpShares) {
         Data storage $ = _loadStorageSlot();
 
+        // if there is an existing deposit cooldown we want to do a linear regression of the current amount and remaining time
+        LastDeposit storage ld = $.lastDeposit[msg.sender];
+        if (ld.timestamp > 0) {
+            uint256 timePassed = block.timestamp - ld.timestamp;
+            if (timePassed < COOLDOWN) {
+                uint256 remaining = COOLDOWN - timePassed;
+                uint256 newAmount = ld.amount * remaining / COOLDOWN;
+                amount += newAmount;
+            }
+        } else {
+            ld.timestamp = uint64(block.timestamp);
+            ld.amount = SafeCastLib.safeCastTo192(amount);
+        }
+
         // Transfer tokens to the pool
         underlying.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -214,8 +237,24 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         if (amount > available) revert InsufficientAssets(amount, available);
 
+        // If there is an existing cooldown since deposit want to check if the cooldown has passed
+        // If not we want to calculate the linear regrassion of the remaining amount and time
+        // and convert it into LP shares to subtract from the available LP shares for the user
+        uint256 availableLpShares = lpToken.balanceOf(msg.sender);
+        LastDeposit storage ld = $.lastDeposit[msg.sender];
+        if (ld.timestamp > 0) {
+            uint256 timePassed = block.timestamp - ld.timestamp;
+            if (timePassed < COOLDOWN) {
+                uint256 remaining = COOLDOWN - timePassed;
+                uint256 cdAmount = ld.amount * remaining / COOLDOWN;
+                uint256 cdLpShares = _calculateLpShares(cdAmount);
+                availableLpShares -= cdLpShares;
+            }
+        }
+
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
+        if (lpShares > availableLpShares) revert WithdrawalCooldown(lpShares, availableLpShares);
         if (lpShares > maxLpSharesBurnt) revert SlippageThresholdExceeded(lpShares, maxLpSharesBurnt);
 
         // Update liabilities

@@ -271,7 +271,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         (SD59x18 s, SD59x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
-        return _quote(asset, amount, p);
+        return _quote(amount, p);
     }
 
     /**
@@ -296,7 +296,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
 
-        (out, fee) = _quote(asset, amount, p);
+        (out, fee) = _quote(amount, p);
 
         // Revert if slippage threshold is exceeded, i.e. if `out` is less than `minOut`
         if (out < minOut) revert SlippageThresholdExceeded(out, minOut);
@@ -463,7 +463,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         emit UnlockRedeemed(msg.sender, unlock.id, amountReceived, relayerReward, fee);
     }
 
-    function _quote(address asset, uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
+    function _quote(uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
         SD59x18 x = sd(int256(amount));

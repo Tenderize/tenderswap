@@ -9,8 +9,8 @@
 //
 // Copyright (c) Tenderize Labs Ltd
 
-import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
-import { UD60x18, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
+import { SD59x18, ZERO as ZERO_SD59, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
+import { UD60x18, ZERO as ZERO_UD60, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
@@ -31,8 +31,6 @@ import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
 pragma solidity 0.8.19;
-
-// TODO: fix '_utilisation' to use UD60x18
 
 error UnlockNotMature(uint256 maturity, uint256 timestamp);
 error UnlockAlreadyMature(uint256 maturity, uint256 timestamp);
@@ -149,9 +147,9 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Current general utilisation ratio of the pool's liquidity
      * @dev `utilisation = unlocking / liabilities`
      */
-    function utilisation() public view returns (SD59x18 r) {
+    function utilisation() public view returns (UD60x18 r) {
         Data storage $ = _loadStorageSlot();
-        if ($.liabilities == 0) return ZERO;
+        if ($.liabilities == 0) return ZERO_UD60;
         r = _utilisation($.unlocking, $.liabilities);
     }
 
@@ -372,7 +370,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO;
+            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -455,7 +453,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO;
+            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -502,8 +500,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         return Registry(registry).isTenderizer(asset) && Tenderizer(asset).asset() == address(underlying);
     }
 
-    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (SD59x18 r) {
-        r = sd(int256(unlocking)).div(sd(int256(liabilities)));
+    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (UD60x18 r) {
+        r = ud(unlocking).div(ud(liabilities));
     }
 
     function _unlock(address asset, uint256 amount, uint256 fee) internal {

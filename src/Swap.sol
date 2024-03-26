@@ -549,7 +549,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     /**
      * @notice Calculates the amount of LP tokens represented by a given amount of liabilities
      */
-    function _calculateLpShares(uint256 amount) internal view returns (uint256) {
+    function _calculateLpShares(uint256 amount) internal view returns (uint256 shares) {
         Data storage $ = _loadStorageSlot();
 
         uint256 supply = lpToken.totalSupply();
@@ -558,7 +558,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
             return amount;
         }
 
-        return amount * supply / $.liabilities;
+        shares = amount * 1e18 * supply / $.liabilities;
+        if (shares == 0) {
+            revert InsufficientAssets(amount, $.liabilities);
+        }
     }
 
     ///@dev required by the OZ UUPS module

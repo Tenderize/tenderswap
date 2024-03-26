@@ -30,10 +30,16 @@ import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
-pragma solidity >=0.8.19;
+pragma solidity 0.8.19;
 
-// TODO: UUPS upgradeable
 // TODO: fix '_utilisation' to use UD60x18
+
+error UnlockNotMature(uint256 maturity, uint256 timestamp);
+error UnlockAlreadyMature(uint256 maturity, uint256 timestamp);
+error InvalidAsset(address asset);
+error SlippageThresholdExceeded(uint256 out, uint256 minOut);
+error InsufficientAssets(uint256 requested, uint256 available);
+error RecoveryMode();
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
@@ -89,13 +95,6 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     using SafeTransferLib for ERC20;
     using SafeCastLib for uint256;
     using UnlockQueue for UnlockQueue.Data;
-
-    error UnlockNotMature(uint256 maturity, uint256 timestamp);
-    error UnlockAlreadyMature(uint256 maturity, uint256 timestamp);
-    error InvalidAsset(address asset);
-    error SlippageThresholdExceeded(uint256 out, uint256 minOut);
-    error InsufficientAssets(uint256 requested, uint256 available);
-    error RecoveryMode();
 
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
     event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
@@ -180,9 +179,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Deposit liquidity into the pool, receive liquidity pool shares in return.
      * The liquidity pool shares represent an amount of liabilities owed to the liquidity provider.
      * @param amount Amount of liquidity to deposit
+     * @param minLpShares Minimum amount of liquidity pool shares to receive
      * @return lpShares Amount of liquidity pool shares minted
      */
-    function deposit(uint256 amount) external returns (uint256 lpShares) {
+    function deposit(uint256 amount, uint256 minLpShares) external returns (uint256 lpShares) {
         Data storage $ = _loadStorageSlot();
 
         // Transfer tokens to the pool
@@ -190,6 +190,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         // Calculate LP tokens to mint
         lpShares = _calculateLpShares(amount);
+        if (lpShares < minLpShares) revert SlippageThresholdExceeded(lpShares, minLpShares);
 
         // Update liabilities
         $.liabilities += amount;
@@ -206,8 +207,9 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * In this case the liquidity provider has to wait until pending unlocks are processed,
      * and the liquidity becomes available again to withdraw.
      * @param amount Amount of liquidity to withdraw
+     * @param maxLpSharesBurnt Maximum amount of liquidity pool shares to burn
      */
-    function withdraw(uint256 amount) external {
+    function withdraw(uint256 amount, uint256 maxLpSharesBurnt) external {
         Data storage $ = _loadStorageSlot();
 
         uint256 available = liquidity();
@@ -216,6 +218,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
+        if (lpShares > maxLpSharesBurnt) revert SlippageThresholdExceeded(lpShares, maxLpSharesBurnt);
 
         // Update liabilities
         $.liabilities -= amount;

@@ -14,6 +14,7 @@ import { UD60x18, ZERO as ZERO_UD60, UNIT as UNIT_60x18, ud } from "@prb/math/UD
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
+import { FixedPointMathLib } from "solmate/utils/FixedPointMathLib.sol";
 import { Adapter } from "@tenderize/stake/adapters/Adapter.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
@@ -29,6 +30,7 @@ import { SelfPermit } from "@tenderize/swap/util/SelfPermit.sol";
 import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
+import { WithdrawList } from "@tenderize/swap/WithdrawList.sol";
 
 pragma solidity 0.8.19;
 
@@ -39,6 +41,9 @@ error SlippageThresholdExceeded(uint256 out, uint256 minOut);
 error InsufficientAssets(uint256 requested, uint256 available);
 error RecoveryMode();
 error WithdrawalCooldown(uint256 lpSharesRequested, uint256 lpSharesAvailable);
+
+error UnauthorizedWithdrawal(address caller, address owner);
+error AvailableWithdrawalExceeded(uint256 requested, uint256 available);
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
@@ -76,6 +81,9 @@ abstract contract SwapStorage {
         SD59x18 S;
         // Unlock queue to hold unlocks
         UnlockQueue.Data unlockQ;
+        // Withdraw list to hold withdrawals
+        WithdrawList.Data withdrawList;
+        uint256 pendingWithdrawal;
         // Recovery amount, if `recovery` > 0 enable recovery mode
         uint256 recovery;
         // amount unlocking per asset
@@ -102,9 +110,11 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     using SafeTransferLib for ERC20;
     using SafeCastLib for uint256;
     using UnlockQueue for UnlockQueue.Data;
+    using WithdrawList for WithdrawList.Data;
 
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
-    event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
+    event Withdraw(address indexed to, uint256 amount, uint256 remaining, uint256 requestId);
+    event RequestWithdraw(address indexed to, uint256 amount, uint256 available, uint256 requestId);
     event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 amountOut);
     event UnlockBought(address indexed caller, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event UnlockRedeemed(address indexed relayer, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
@@ -223,51 +233,143 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     }
 
     /**
-     * @notice Withdraw liquidity from the pool, burn liquidity pool shares.
-     * If not enough liquidity is available, the transaction will revert.
-     * In this case the liquidity provider has to wait until pending unlocks are processed,
-     * and the liquidity becomes available again to withdraw.
+     * @notice Request to withdraw liquidity from the pool, creates a withdrawal request.
+     * The liquidity provider can withdraw the 'available' amount at any time, the remainder of 'withdrawable',
+     * will be available once pending unlocks are processed and the liquidity becomes available again.
+     * Cretes a withdrawal request.
      * @param amount Amount of liquidity to withdraw
      * @param maxLpSharesBurnt Maximum amount of liquidity pool shares to burn
+     * @return requestId ID of the withdrawal request
      */
-    function withdraw(uint256 amount, uint256 maxLpSharesBurnt) external {
+    function requestWithdraw(uint256 amount, uint256 maxLpSharesBurnt) external returns (uint256 requestId) {
         Data storage $ = _loadStorageSlot();
-
-        uint256 available = liquidity();
-
-        if (amount > available) revert InsufficientAssets(amount, available);
-
-        // If there is an existing cooldown since deposit want to check if the cooldown has passed
-        // If not we want to calculate the linear regrassion of the remaining amount and time
-        // and convert it into LP shares to subtract from the available LP shares for the user
-        uint256 availableLpShares = lpToken.balanceOf(msg.sender);
-        LastDeposit storage ld = $.lastDeposit[msg.sender];
-        if (ld.timestamp > 0) {
-            uint256 timePassed = block.timestamp - ld.timestamp;
-            if (timePassed < COOLDOWN) {
-                uint256 remaining = COOLDOWN - timePassed;
-                uint256 cdAmount = ld.amount * remaining / COOLDOWN;
-                uint256 cdLpShares = _calculateLpShares(cdAmount);
-                availableLpShares -= cdLpShares;
-            }
-        }
+        uint256 liabilities = $.liabilities;
+        uint256 available = liabilities - $.unlocking;
 
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
-        if (lpShares > availableLpShares) revert WithdrawalCooldown(lpShares, availableLpShares);
+
         if (lpShares > maxLpSharesBurnt) revert SlippageThresholdExceeded(lpShares, maxLpSharesBurnt);
+
+        WithdrawList.Request memory request = WithdrawList.Request({
+            withdrawable: amount,
+            available: available >= liabilities ? amount : FixedPointMathLib.mulDivDown(amount, available, liabilities),
+            owner: msg.sender
+        });
+
+        requestId = $.withdrawList.push(request);
 
         // Update liabilities
         $.liabilities -= amount;
 
+        // Update pending withdrawal
+        $.pendingWithdrawal += amount;
+
         // Burn LP tokens from the caller
         lpToken.burn(msg.sender, lpShares);
+
+        emit RequestWithdraw(msg.sender, amount, available, requestId);
+    }
+
+    /**
+     * @notice Withdraw liquidity from the pool from a withdrawal request.
+     * It is possible to withdraw a partial amount of 'available'.
+     * @param requestId ID of the withdrawal request
+     * @param amount Amount of liquidity to withdraw
+     */
+    function withdraw2(uint256 requestId, uint256 amount) external {
+        Data storage $ = _loadStorageSlot();
+        WithdrawList.Request memory request = $.withdrawList.itemAt(requestId).request;
+        address owner = request.owner;
+        if (owner != msg.sender) revert UnauthorizedWithdrawal(msg.sender, owner);
+
+        uint256 available = request.available;
+        if (amount > available) revert AvailableWithdrawalExceeded(amount, available);
+
+        if (amount == request.withdrawable) {
+            // Remove request from list
+            $.withdrawList.remove(requestId);
+        } else {
+            request.withdrawable -= amount;
+            request.available -= amount;
+            $.withdrawList.update(requestId, request);
+        }
 
         // Transfer tokens to caller
         underlying.safeTransfer(msg.sender, amount);
 
-        emit Withdraw(msg.sender, amount, lpShares);
+        emit Withdraw(msg.sender, amount, request.withdrawable, requestId);
     }
+
+    function _replenishWithdrawalRequests(uint256 totalAmount) internal {
+        Data storage $ = _loadStorageSlot();
+        uint256 remaining = totalAmount > $.pendingWithdrawal ? $.pendingWithdrawal : totalAmount;
+
+        while (remaining > 0) {
+            WithdrawList.Request memory request = $.withdrawList.head().request;
+            if (request.available == request.withdrawable) {
+                break;
+            }
+            uint256 amount = request.withdrawable - request.available;
+            if (amount > remaining) {
+                request.available += remaining;
+                $.withdrawList.update($.withdrawList._head, request);
+                break;
+            } else {
+                request.available = request.withdrawable;
+                $.withdrawList.update($.withdrawList._head, request);
+                remaining -= amount;
+            }
+        }
+        $.pendingWithdrawal -= totalAmount - remaining;
+    }
+
+    // /**
+    //  * @notice Withdraw liquidity from the pool, burn liquidity pool shares.
+    //  * If not enough liquidity is available, the transaction will revert.
+    //  * In this case the liquidity provider has to wait until pending unlocks are processed,
+    //  * and the liquidity becomes available again to withdraw.
+    //  * @param amount Amount of liquidity to withdraw
+    //  * @param maxLpSharesBurnt Maximum amount of liquidity pool shares to burn
+    //  */
+    // function withdraw(uint256 amount, uint256 maxLpSharesBurnt) external {
+    //     Data storage $ = _loadStorageSlot();
+
+    //     uint256 available = liquidity();
+
+    //     if (amount > available) revert InsufficientAssets(amount, available);
+
+    //     // If there is an existing cooldown since deposit want to check if the cooldown has passed
+    //     // If not we want to calculate the linear regression of the remaining amount and time
+    //     // and convert it into LP shares to subtract from the available LP shares for the user
+    //     uint256 availableLpShares = lpToken.balanceOf(msg.sender);
+    //     LastDeposit storage ld = $.lastDeposit[msg.sender];
+    //     if (ld.timestamp > 0) {
+    //         uint256 timePassed = block.timestamp - ld.timestamp;
+    //         if (timePassed < COOLDOWN) {
+    //             uint256 remaining = COOLDOWN - timePassed;
+    //             uint256 cdAmount = ld.amount * remaining / COOLDOWN;
+    //             uint256 cdLpShares = _calculateLpShares(cdAmount);
+    //             availableLpShares -= cdLpShares;
+    //         }
+    //     }
+
+    //     // Calculate LP tokens to burn
+    //     uint256 lpShares = _calculateLpShares(amount);
+    //     if (lpShares > availableLpShares) revert WithdrawalCooldown(lpShares, availableLpShares);
+    //     if (lpShares > maxLpSharesBurnt) revert SlippageThresholdExceeded(lpShares, maxLpSharesBurnt);
+
+    //     // Update liabilities
+    //     $.liabilities -= amount;
+
+    //     // Burn LP tokens from the caller
+    //     lpToken.burn(msg.sender, lpShares);
+
+    //     // Transfer tokens to caller
+    //     underlying.safeTransfer(msg.sender, amount);
+
+    //     emit Withdraw(msg.sender, amount, lpShares);
+    // }
 
     /**
      * @notice Claim outstanding rewards for a relayer.
@@ -414,6 +516,9 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
 
+        if ($.pendingWithdrawal > 0) {
+            _replenishWithdrawalRequests(unlock.amount);
+        }
         // transfer unlock amount minus reward from caller to pool
         underlying.safeTransferFrom(msg.sender, address(this), unlock.amount - reward);
 
@@ -496,6 +601,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
+
+        if ($.pendingWithdrawal > 0) {
+            _replenishWithdrawalRequests(unlock.amount);
+        }
 
         // - Update liabilities to distribute LP rewards
         $.liabilities += fee;

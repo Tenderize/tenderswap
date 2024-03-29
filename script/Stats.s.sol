@@ -4,7 +4,7 @@ pragma solidity ^0.8.17;
 import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { TenderSwap, Config } from "@tenderize/swap/Swap.sol";
-import { SD59x18 } from "@prb/math/SD59x18.sol";
+import { UD60x18 } from "@prb/math/UD60x18.sol";
 import { Tenderizer } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 import { StakingXYZ } from "lib/staking/test/helpers/StakingXYZ.sol";
 
@@ -29,7 +29,7 @@ contract Stats is Script {
         swap.swap(address(0xE3350e66D3850B4f4C97b6737E9e8Ff78CFC1b00), 1 ether, 0);
         uint256 liabilities = swap.liabilities();
         uint256 liquidity = swap.liquidity();
-        SD59x18 utilisation = swap.utilisation();
+        UD60x18 utilisation = swap.utilisation();
 
         console2.log("liabilities %s", liabilities);
         console2.log("liquidity %s", liquidity);

@@ -31,8 +31,6 @@ import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
-import { console } from "forge-std/Test.sol";
-
 pragma solidity 0.8.19;
 
 error ErrorNotMature(uint256 maturity, uint256 timestamp);
@@ -248,12 +246,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         uint256 availableLpShares = lpToken.balanceOf(msg.sender);
         LastDeposit storage ld = $.lastDeposit[msg.sender];
         if (ld.timestamp > 0) {
-            console.log("time passed", block.timestamp - ld.timestamp);
             uint256 timePassed = block.timestamp - ld.timestamp;
             if (timePassed < COOLDOWN) {
                 uint256 remaining = COOLDOWN - timePassed;
                 uint256 cdAmount = FixedPointMathLib.mulDivUp(ld.amount, remaining, COOLDOWN);
-                console.log("cdAmount", cdAmount);
                 uint256 cdLpShares = _calculateLpShares(cdAmount);
                 availableLpShares -= cdLpShares;
             }
@@ -261,7 +257,6 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
-        console.log("wanted-avail", lpShares, availableLpShares);
         if (lpShares > availableLpShares) revert ErrorWithdrawCooldown(lpShares, availableLpShares);
         if (lpShares > maxLpSharesBurnt) revert ErrorSlippage(lpShares, maxLpSharesBurnt);
 

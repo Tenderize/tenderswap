@@ -40,8 +40,6 @@ import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
 import { acceptableDelta } from "./helpers/Utils.sol";
 
-import { console } from "forge-std/console.sol";
-
 contract TenderSwapTest is Test {
     MockERC20 underlying;
     MockERC20 tToken0;
@@ -84,7 +82,6 @@ contract TenderSwapTest is Test {
     }
 
     function testFuzz_deposits(uint256 x, uint256 y, uint256 l) public {
-        console.log(block.timestamp);
         uint256 deposit1 = bound(x, 100, type(uint128).max);
         l = bound(l, deposit1, deposit1 * 1e18);
         uint256 deposit2 = bound(y, 100, type(uint128).max);
@@ -106,8 +103,6 @@ contract TenderSwapTest is Test {
         vm.stopPrank();
 
         uint256 expBal2 = deposit2 * (deposit1 * 1e18 / l);
-
-        console.log("u b of", underlying.balanceOf(address(swap)));
 
         assertEq(swap.lpToken().totalSupply(), (deposit1 * 1e18 + expBal2), "lpToken totalSupply");
         assertEq(swap.lpToken().balanceOf(addr1), deposit1 * 1e18, "addr1 lpToken balance");
@@ -142,7 +137,6 @@ contract TenderSwapTest is Test {
 
         // deposit again, the new cooldown amount will be half of the previous plus our new deposit
         uint256 deposit2 = bound(deposit, 100, deposit);
-        console.log("deposit2", deposit2);
         underlying.mint(address(this), deposit2);
         underlying.approve(address(swap), deposit2);
         swap.deposit(deposit2, 0);

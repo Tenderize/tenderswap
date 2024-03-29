@@ -37,10 +37,10 @@ contract LPToken is ERC20 {
     }
 
     function _encodeName(string memory _name) internal pure returns (string memory) {
-        return string(abi.encodePacked("TenderSwap", " ", _name));
+        return string.concat("TenderSwap", " ", _name);
     }
 
     function _encodeSymbol(string memory _symbol) internal pure returns (string memory) {
-        return string(abi.encodePacked("tSWAP", " ", _symbol));
+        return string.concat("tSWAP", " ", _symbol);
     }
 }

@@ -33,7 +33,7 @@ import {
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
 import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
-import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/ud60x18.sol";
+import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/UD60x18.sol";
 
 import { SwapHarness } from "./Swap.harness.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";

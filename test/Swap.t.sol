@@ -19,11 +19,21 @@ import { Adapter } from "@tenderize/stake/adapters/Adapter.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 
-import { TenderSwap, Config, BASE_FEE, RELAYER_CUT, MIN_LP_CUT, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
+import {
+    TenderSwap,
+    Config,
+    BASE_FEE,
+    RELAYER_CUT,
+    MIN_LP_CUT,
+    _encodeTokenId,
+    _decodeTokenId,
+    COOLDOWN,
+    ErrorWithdrawCooldown
+} from "@tenderize/swap/Swap.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
 import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
-import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/ud60x18.sol";
+import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/UD60x18.sol";
 
 import { SwapHarness } from "./Swap.harness.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
@@ -72,31 +82,76 @@ contract TenderSwapTest is Test {
     }
 
     function testFuzz_deposits(uint256 x, uint256 y, uint256 l) public {
-        uint256 deposit1 = bound(x, 1, type(uint128).max);
-        uint256 deposit2 = bound(y, 1, type(uint128).max);
-        l = bound(l, 1, type(uint128).max);
+        uint256 deposit1 = bound(x, 100, type(uint128).max);
+        l = bound(l, deposit1, deposit1 * 1e18);
+        uint256 deposit2 = bound(y, 100, type(uint128).max);
         underlying.mint(addr1, deposit1);
         underlying.mint(addr2, deposit2);
 
         vm.startPrank(addr1);
         underlying.approve(address(swap), deposit1);
-        swap.deposit(deposit1);
+        swap.deposit(deposit1, 0);
         vm.stopPrank();
 
         // Change liabilities !
         swap.exposed_setLiabilities(l);
+        underlying.mint(address(swap), l - deposit1);
 
         vm.startPrank(addr2);
         underlying.approve(address(swap), deposit2);
-        swap.deposit(deposit2);
+        swap.deposit(deposit2, 0);
         vm.stopPrank();
 
-        uint256 expBalY = deposit2 * deposit1 / l;
+        uint256 expBal2 = deposit2 * (deposit1 * 1e18 / l);
 
-        assertEq(swap.lpToken().totalSupply(), deposit1 + expBalY, "lpToken totalSupply");
-        assertEq(swap.lpToken().balanceOf(addr1), deposit1, "addr1 lpToken balance");
-        assertEq(swap.lpToken().balanceOf(addr2), expBalY, "addr2 lpToken balance");
-        assertEq(underlying.balanceOf(address(swap)), deposit1 + deposit2, "TenderSwap underlying balance");
+        assertEq(swap.lpToken().totalSupply(), (deposit1 * 1e18 + expBal2), "lpToken totalSupply");
+        assertEq(swap.lpToken().balanceOf(addr1), deposit1 * 1e18, "addr1 lpToken balance");
+        assertEq(swap.lpToken().balanceOf(addr2), expBal2, "addr2 lpToken balance");
+        assertEq(underlying.balanceOf(address(swap)), l + deposit2, "TenderSwap underlying balance");
+    }
+
+    function test_withdrawCooldown(uint256 deposit) public {
+        uint256 start = 1;
+        vm.warp(1);
+        deposit = bound(deposit, 100, type(uint64).max);
+        underlying.mint(address(this), deposit);
+
+        underlying.approve(address(swap), deposit);
+        swap.deposit(deposit, 0);
+
+        vm.expectRevert();
+        // even withdrawing '1' will revert, since no time has elapsed
+        swap.withdraw(1, type(uint256).max);
+
+        vm.warp(block.timestamp + COOLDOWN / 2);
+
+        // withdrawing half + 1 fails as it exceeds the available amount
+        // after only half the time has elapsed
+        vm.expectRevert();
+        swap.withdraw(deposit / 2 + 1, type(uint256).max);
+
+        uint256 balBefore = underlying.balanceOf(address(this));
+        swap.withdraw(deposit / 2, type(uint256).max);
+        uint256 balAfter = underlying.balanceOf(address(this));
+        assertEq(balAfter - balBefore, deposit / 2, "withdraw half");
+
+        // deposit again, the new cooldown amount will be half of the previous plus our new deposit
+        uint256 deposit2 = bound(deposit, 100, deposit);
+        underlying.mint(address(this), deposit2);
+        underlying.approve(address(swap), deposit2);
+        swap.deposit(deposit2, 0);
+        // withdrawing half the original amount should still fail
+        vm.expectRevert();
+        swap.withdraw(deposit / 2 + 1, type(uint256).max);
+
+        vm.warp(start + COOLDOWN);
+        // withdrawing half should work now, withdrawing deposit2 should fail
+        vm.expectRevert();
+        swap.withdraw(deposit2, type(uint256).max);
+
+        swap.withdraw(deposit - deposit / 2, type(uint256).max);
+        balAfter = underlying.balanceOf(address(this));
+        assertEq(balAfter, deposit, "withdraw half");
     }
 
     function test_claimRelayerRewards(uint256 amount) public {
@@ -131,7 +186,7 @@ contract TenderSwapTest is Test {
         uint256 liquidity = 100 ether;
         underlying.mint(address(this), liquidity);
         underlying.approve(address(swap), liquidity);
-        swap.deposit(liquidity);
+        swap.deposit(liquidity, 0);
 
         vm.mockCall(address(tToken0), abi.encodeWithSelector(TenderizerImmutableArgs.adapter.selector), abi.encode(adapter));
 
@@ -241,7 +296,7 @@ contract TenderSwapTest is Test {
         uint256 liquidity = 100 ether;
         underlying.mint(address(this), liquidity);
         underlying.approve(address(swap), liquidity);
-        swap.deposit(liquidity);
+        swap.deposit(liquidity, 0);
 
         uint256 amount = 10 ether;
         uint256 tokenId = _encodeTokenId(address(tToken0), 0);

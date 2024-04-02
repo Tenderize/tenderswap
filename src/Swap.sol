@@ -9,11 +9,12 @@
 //
 // Copyright (c) Tenderize Labs Ltd
 
-import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
-import { UD60x18, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
+import { SD59x18, ZERO as ZERO_SD59, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
+import { UD60x18, ZERO as ZERO_UD60, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
+import { FixedPointMathLib } from "solmate/utils/FixedPointMathLib.sol";
 import { Adapter } from "@tenderize/stake/adapters/Adapter.sol";
 import { Registry } from "@tenderize/stake/registry/Registry.sol";
 import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer/Tenderizer.sol";
@@ -30,15 +31,22 @@ import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
-pragma solidity >=0.8.19;
+pragma solidity 0.8.19;
 
-// TODO: UUPS upgradeable
-// TODO: fix '_utilisation' to use UD60x18
+error ErrorNotMature(uint256 maturity, uint256 timestamp);
+error ErrorAlreadyMature(uint256 maturity, uint256 timestamp);
+error ErrorInvalidAsset(address asset);
+error ErrorSlippage(uint256 out, uint256 minOut);
+error ErrorInsufficientAssets(uint256 requested, uint256 available);
+error ErrorRecoveryMode();
+error ErrorCalculateLPShares();
+error ErrorWithdrawCooldown(uint256 lpSharesRequested, uint256 lpSharesAvailable);
 
 SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
 UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
 UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
 SD59x18 constant K = SD59x18.wrap(3e18);
+uint64 constant COOLDOWN = 12 hours;
 
 struct Config {
     ERC20 underlying;
@@ -51,6 +59,11 @@ struct SwapParams {
     SD59x18 U;
     SD59x18 s;
     SD59x18 S;
+}
+
+struct LastDeposit {
+    uint192 amount;
+    uint64 timestamp;
 }
 
 abstract contract SwapStorage {
@@ -73,6 +86,8 @@ abstract contract SwapStorage {
         mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 reward) relayerRewards;
+        // last deposits (used to check cooldown)
+        mapping(address => LastDeposit) lastDeposit;
     }
 
     function _loadStorageSlot() internal pure returns (Data storage $) {
@@ -89,13 +104,6 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     using SafeTransferLib for ERC20;
     using SafeCastLib for uint256;
     using UnlockQueue for UnlockQueue.Data;
-
-    error UnlockNotMature(uint256 maturity, uint256 timestamp);
-    error UnlockAlreadyMature(uint256 maturity, uint256 timestamp);
-    error InvalidAsset(address asset);
-    error SlippageThresholdExceeded(uint256 out, uint256 minOut);
-    error InsufficientAssets(uint256 requested, uint256 available);
-    error RecoveryMode();
 
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
     event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
@@ -150,9 +158,9 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Current general utilisation ratio of the pool's liquidity
      * @dev `utilisation = unlocking / liabilities`
      */
-    function utilisation() public view returns (SD59x18 r) {
+    function utilisation() public view returns (UD60x18 r) {
         Data storage $ = _loadStorageSlot();
-        if ($.liabilities == 0) return ZERO;
+        if ($.liabilities == 0) return ZERO_UD60;
         r = _utilisation($.unlocking, $.liabilities);
     }
 
@@ -180,16 +188,33 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Deposit liquidity into the pool, receive liquidity pool shares in return.
      * The liquidity pool shares represent an amount of liabilities owed to the liquidity provider.
      * @param amount Amount of liquidity to deposit
+     * @param minLpShares Minimum amount of liquidity pool shares to receive
      * @return lpShares Amount of liquidity pool shares minted
      */
-    function deposit(uint256 amount) external returns (uint256 lpShares) {
+    function deposit(uint256 amount, uint256 minLpShares) external returns (uint256 lpShares) {
         Data storage $ = _loadStorageSlot();
+
+        // if there is an existing deposit cooldown we want to do a linear regression of the current amount and remaining time
+        LastDeposit storage ld = $.lastDeposit[msg.sender];
+        if (ld.timestamp > 0) {
+            uint256 timePassed = block.timestamp - ld.timestamp;
+            if (timePassed < COOLDOWN) {
+                uint256 remaining = COOLDOWN - timePassed;
+                uint256 newAmount = FixedPointMathLib.mulDivUp(ld.amount, remaining, COOLDOWN);
+                ld.amount += SafeCastLib.safeCastTo192(newAmount);
+                ld.timestamp = uint64(block.timestamp);
+            }
+        } else {
+            ld.timestamp = uint64(block.timestamp);
+            ld.amount = SafeCastLib.safeCastTo192(amount);
+        }
 
         // Transfer tokens to the pool
         underlying.safeTransferFrom(msg.sender, address(this), amount);
 
         // Calculate LP tokens to mint
         lpShares = _calculateLpShares(amount);
+        if (lpShares < minLpShares) revert ErrorSlippage(lpShares, minLpShares);
 
         // Update liabilities
         $.liabilities += amount;
@@ -206,16 +231,34 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * In this case the liquidity provider has to wait until pending unlocks are processed,
      * and the liquidity becomes available again to withdraw.
      * @param amount Amount of liquidity to withdraw
+     * @param maxLpSharesBurnt Maximum amount of liquidity pool shares to burn
      */
-    function withdraw(uint256 amount) external {
+    function withdraw(uint256 amount, uint256 maxLpSharesBurnt) external {
         Data storage $ = _loadStorageSlot();
 
         uint256 available = liquidity();
 
-        if (amount > available) revert InsufficientAssets(amount, available);
+        if (amount > available) revert ErrorInsufficientAssets(amount, available);
+
+        // If there is an existing cooldown since deposit want to check if the cooldown has passed
+        // If not we want to calculate the linear regrassion of the remaining amount and time
+        // and convert it into LP shares to subtract from the available LP shares for the user
+        uint256 availableLpShares = lpToken.balanceOf(msg.sender);
+        LastDeposit storage ld = $.lastDeposit[msg.sender];
+        if (ld.timestamp > 0) {
+            uint256 timePassed = block.timestamp - ld.timestamp;
+            if (timePassed < COOLDOWN) {
+                uint256 remaining = COOLDOWN - timePassed;
+                uint256 cdAmount = FixedPointMathLib.mulDivUp(ld.amount, remaining, COOLDOWN);
+                uint256 cdLpShares = _calculateLpShares(cdAmount);
+                availableLpShares -= cdLpShares;
+            }
+        }
 
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
+        if (lpShares > availableLpShares) revert ErrorWithdrawCooldown(lpShares, availableLpShares);
+        if (lpShares > maxLpSharesBurnt) revert ErrorSlippage(lpShares, maxLpSharesBurnt);
 
         // Update liabilities
         $.liabilities -= amount;
@@ -271,7 +314,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         (SD59x18 s, SD59x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
-        return _quote(asset, amount, p);
+        return _quote(amount, p);
     }
 
     /**
@@ -285,7 +328,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @return fee Amount of fees paid
      */
     function swap(address asset, uint256 amount, uint256 minOut) external returns (uint256 out, uint256 fee) {
-        if (!_isValidAsset(asset)) revert InvalidAsset(asset);
+        if (!_isValidAsset(asset)) revert ErrorInvalidAsset(asset);
 
         Data storage $ = _loadStorageSlot();
 
@@ -296,10 +339,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
 
-        (out, fee) = _quote(asset, amount, p);
+        (out, fee) = _quote(amount, p);
 
         // Revert if slippage threshold is exceeded, i.e. if `out` is less than `minOut`
-        if (out < minOut) revert SlippageThresholdExceeded(out, minOut);
+        if (out < minOut) revert ErrorSlippage(out, minOut);
 
         // update pool state
         // - Update total amount unlocking
@@ -337,7 +380,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         // Can not purchase unlocks in recovery mode
         // The fees need to flow back to paying off debt and relayers are cheaper
-        if ($.recovery > 0) revert RecoveryMode();
+        if ($.recovery > 0) revert ErrorRecoveryMode();
 
         // get newest item from unlock queue
         UnlockQueue.Item memory unlock = $.unlockQ.popTail().data;
@@ -347,7 +390,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         (address tenderizer,) = _decodeTokenId(tokenId);
         Adapter adapter = Tenderizer(tenderizer).adapter();
         uint256 time = adapter.currentTime();
-        if (unlock.maturity <= time) revert UnlockAlreadyMature(unlock.maturity, block.timestamp);
+        if (unlock.maturity <= time) revert ErrorAlreadyMature(unlock.maturity, block.timestamp);
 
         // Calculate the reward for purchasing the unlock
         // The base reward is the fee minus the MIN_LP_CUT going to liquidity providers
@@ -369,7 +412,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO;
+            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -452,7 +495,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO;
+            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -463,7 +506,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         emit UnlockRedeemed(msg.sender, unlock.id, amountReceived, relayerReward, fee);
     }
 
-    function _quote(address asset, uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
+    function _quote(uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
         SD59x18 x = sd(int256(amount));
@@ -499,8 +542,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         return Registry(registry).isTenderizer(asset) && Tenderizer(asset).asset() == address(underlying);
     }
 
-    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (SD59x18 r) {
-        r = sd(int256(unlocking)).div(sd(int256(liabilities)));
+    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (UD60x18 r) {
+        r = ud(unlocking).div(ud(liabilities));
     }
 
     function _unlock(address asset, uint256 amount, uint256 fee) internal {
@@ -546,16 +589,20 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     /**
      * @notice Calculates the amount of LP tokens represented by a given amount of liabilities
      */
-    function _calculateLpShares(uint256 amount) internal view returns (uint256) {
+    function _calculateLpShares(uint256 amount) internal view returns (uint256 shares) {
         Data storage $ = _loadStorageSlot();
 
         uint256 supply = lpToken.totalSupply();
+        uint256 liabilities = $.liabilities;
 
-        if (supply == 0) {
-            return amount;
+        if (liabilities == 0) {
+            return amount * 1e18;
         }
 
-        return amount * supply / $.liabilities;
+        shares = amount * (supply / liabilities); // calculate factor first since it's scaled up
+        if (shares == 0) {
+            revert ErrorCalculateLPShares();
+        }
     }
 
     ///@dev required by the OZ UUPS module

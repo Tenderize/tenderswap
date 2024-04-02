@@ -19,6 +19,7 @@ pragma solidity >=0.8.19;
 
 library UnlockQueue {
     error QueueEmpty();
+    error IdExists();
 
     struct Item {
         uint256 id;
@@ -109,6 +110,10 @@ library UnlockQueue {
     function push(UnlockQueue.Data storage q, Item memory unlock) internal {
         uint256 tail = q._tail;
         uint256 newTail = unlock.id;
+
+        if (tail != 0) {
+            if (q.nodes[newTail].data.id != 0) revert IdExists();
+        }
 
         q.nodes[newTail].data = unlock;
         q.nodes[newTail].prev = tail;

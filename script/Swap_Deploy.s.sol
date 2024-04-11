@@ -3,7 +3,11 @@ pragma solidity ^0.8.17;
 
 import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
-import { TenderSwap, Config } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
+import { SwapFactory } from "@tenderize/swap/Factory.sol";
+import { SD59x18 } from "@prb/math/SD59x18.sol";
+
+address constant FACTORY = address(0);
 
 contract Swap_Deploy is Script {
     // Contracts are deployed deterministically.
@@ -16,11 +20,12 @@ contract Swap_Deploy is Script {
     address underlying = vm.envAddress("UNDERLYING");
     address registry = vm.envAddress("REGISTRY");
     address unlocks = vm.envAddress("UNLOCKS");
-    Config cfg = Config({ underlying: ERC20(underlying), registry: registry, unlocks: unlocks });
+    ConstructorConfig cfg =
+        ConstructorConfig({ UNDERLYING: ERC20(underlying), BASE_FEE: SD59x18.wrap(0.0005e18), K: SD59x18.wrap(3e18) });
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        TenderSwap swap = new TenderSwap{salt: salt}(cfg);
+        TenderSwap swap = new TenderSwap{ salt: salt }(cfg);
         console2.log("TenderSwap deployed at: ", address(swap));
         vm.stopBroadcast();
     }

@@ -11,13 +11,13 @@
 
 pragma solidity >=0.8.19;
 
-import { TenderSwap, Config } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
 // solhint-disable func-name-mixedcase
 
 contract SwapHarness is TenderSwap {
-    constructor(Config memory config) TenderSwap(config) { }
+    constructor(ConstructorConfig memory config) TenderSwap(config) { }
 
     function exposed_setLiabilities(uint256 _liabilities) public {
         Data storage $ = _loadStorageSlot();

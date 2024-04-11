@@ -3,7 +3,7 @@ pragma solidity ^0.8.17;
 
 import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
-import { TenderSwap, Config } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 
 contract Add_Liquidity is Script {
     // Contracts are deployed deterministically.

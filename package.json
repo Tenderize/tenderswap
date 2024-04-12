@@ -14,7 +14,7 @@
   "scripts": {
     "clean": "rm -rf cache out",
     "lint": "yarn lint:sol && yarn prettier:write",
-    "lint:sol": "yarn solhint {src,test}/**/*.sol",
+    "lint:sol": "forge fmt && yarn solhint src/**/*.sol",
     "prettier:check": "prettier --check **/*.{json,md,yml} --ignore-path=.prettierignore",
     "prettier:write": "prettier --write **/*.{json,md,yml} --ignore-path=.prettierignore"
   }

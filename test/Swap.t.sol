@@ -78,7 +78,7 @@ contract TenderSwapTest is Test {
         swap = new SwapHarness(cfg);
         address proxy = address(new ERC1967Proxy(address(swap), ""));
         swap = SwapHarness(proxy);
-        swap.intialize();
+        swap.initialize();
     }
 
     function testFuzz_deposits(uint256 x, uint256 y, uint256 l) public {
@@ -123,15 +123,6 @@ contract TenderSwapTest is Test {
         assertEq(swap.pendingRelayerRewards(addr1), 0, "pending rewards");
         assertEq(underlying.balanceOf(addr1), amount, "addr1 balance");
     }
-
-    // write end to end swap test with checking the queue
-    // make three swaps, check the queue state (check head and tail)
-    // buy up the last unlock and check all code paths
-    // * mock unlocks as ERC721 mock transfer
-    // process blocks and redeem the first unlock and check all code paths
-    // * mock Tenderizer.withdraw()
-    // check that queue is now only containing the second unlock
-    // * Mock Tenderizer.unlock() and Tenderizer.unlockMaturity()
 
     function test_scenario_full() public {
         uint256 unlockTime = 100;
@@ -257,7 +248,6 @@ contract TenderSwapTest is Test {
         swap.deposit(liquidity, 0);
 
         uint256 amount = 10 ether;
-        uint256 tokenId = _encodeTokenId(address(tToken0), 0);
 
         vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
         vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
@@ -271,5 +261,67 @@ contract TenderSwapTest is Test {
         assertEq(fee, expFee, "swap fee");
         assertEq(out, amount - expFee, "swap out");
         assertEq(swap.liquidity(), 90 ether, "TenderSwap available liquidity");
+    }
+
+    function testFuzz_swap(uint256 liquidity) public {
+        liquidity = bound(liquidity, 1e18, type(uint128).max);
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity, 0);
+
+        uint256 amount = bound(liquidity, 1e9, liquidity);
+
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount), abi.encode(0));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+
+        tToken0.mint(address(this), amount);
+        tToken0.approve(address(swap), amount);
+        (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
+        console.log("out %s", out);
+        console.log("fee %s", fee);
+        // just assert the call doesnt fail for now
+    }
+
+    function testFuzz_swap_multiple(uint256 liquidity) public {
+        liquidity = bound(liquidity, 10e18, type(uint128).max);
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity, 0);
+
+        uint256 amount_1 = bound(liquidity, 10e9, liquidity / 2);
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount_1), abi.encode(0));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+        tToken0.mint(address(this), amount_1);
+        tToken0.approve(address(swap), amount_1);
+        (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount_1, 0);
+        console.log("amount_1");
+        console.log("out %s", out);
+        console.log("fee %s", fee);
+        console.log("=============");
+        assertTrue(fee <= out);
+
+        uint256 amount_2 = bound(liquidity, 10e9, (liquidity - amount_1) / 2);
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount_2), abi.encode(1));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 1), abi.encode(block.number + 101));
+        tToken0.mint(address(this), amount_2);
+        tToken0.approve(address(swap), amount_2);
+        (out, fee) = swap.swap(address(tToken0), amount_2, 0);
+        console.log("amount_2");
+        console.log("out %s", out);
+        console.log("fee %s", fee);
+        console.log("=============");
+        assertTrue(fee <= out);
+
+        uint256 amount_3 = bound(liquidity, 1e9, liquidity - amount_1 - amount_2);
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount_3), abi.encode(2));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 2), abi.encode(block.number + 102));
+        tToken0.mint(address(this), amount_3);
+        tToken0.approve(address(swap), amount_3);
+        (out, fee) = swap.swap(address(tToken0), amount_3, 0);
+        console.log("amount_3");
+        console.log("out %s", out);
+        console.log("fee %s", fee);
+        console.log("=============");
+        assertTrue(fee <= out);
     }
 }

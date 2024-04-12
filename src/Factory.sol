@@ -15,32 +15,47 @@ import { Owned } from "solmate/auth/Owned.sol";
 import { ERC1967Proxy } from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 
+import { OwnableUpgradeable } from "openzeppelin-contracts-upgradeable/access/OwnableUpgradeable.sol";
+import { Initializable } from "openzeppelin-contracts-upgradeable/proxy/utils/Initializable.sol";
+import { UUPSUpgradeable } from "openzeppelin-contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
 // Used for subgraph indexing and atomic deployments
 
-contract SwapFactory is Owned {
+contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     event SwapDeployed(address underlying, address swap, address implementation);
     event SwapUpgraded(address underlying, address swap, address implementation);
 
-    constructor(address _owner) Owned(_owner) { }
-
-    function deploy(ConstructorConfig memory cfg) external onlyOwner {
-        // Deploy the implementation
-        address implementation = address(new TenderSwap(cfg));
-        // deploy the contract
-        address instance = address(new ERC1967Proxy(implementation, ""));
-
-        TenderSwap(instance).transferOwnership(owner);
-
-        emit SwapDeployed(address(cfg.UNDERLYING), instance, implementation);
+    function initialize() public initializer {
+        __Ownable_init();
+        __UUPSUpgradeable_init();
     }
 
-    function upgrade(ConstructorConfig memory cfg, address swapProxy) external onlyOwner {
+    constructor() {
+        _disableInitializers();
+    }
+
+    function deploy(ConstructorConfig memory cfg) external onlyOwner returns (address proxy, address implementation) {
+        // Deploy the implementation
+        implementation = address(new TenderSwap(cfg));
+        // deploy the contract
+        proxy = address(new ERC1967Proxy(implementation, abi.encodeWithSelector(TenderSwap.initialize.selector)));
+
+        TenderSwap(proxy).transferOwnership(owner());
+
+        emit SwapDeployed(address(cfg.UNDERLYING), proxy, implementation);
+    }
+
+    function upgrade(ConstructorConfig memory cfg, address swapProxy) external onlyOwner returns (address implementation) {
         if (TenderSwap(swapProxy).UNDERLYING() != cfg.UNDERLYING) {
             revert("SwapFactory: UNDERLYING_MISMATCH");
         }
 
-        address implementation = address(new TenderSwap(cfg));
+        implementation = address(new TenderSwap(cfg));
 
         TenderSwap(swapProxy).upgradeTo(implementation);
     }
+
+    ///@dev required by the OZ UUPS module
+    // solhint-disable-next-line no-empty-blocks
+    function _authorizeUpgrade(address) internal override onlyOwner { }
 }

@@ -33,6 +33,10 @@ import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
 pragma solidity 0.8.20;
 
+Registry constant REGISTRY = Registry(0xa7cA8732Be369CaEaE8C230537Fc8EF82a3387EE);
+ERC721 constant UNLOCKS = ERC721(0xb98c7e67f63d198BD96574073AD5B3427a835796);
+address constant TREASURY = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
+
 error ErrorNotMature(uint256 maturity, uint256 timestamp);
 error ErrorAlreadyMature(uint256 maturity, uint256 timestamp);
 error ErrorInvalidAsset(address asset);
@@ -112,11 +116,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     // Cut of the fee for the relayer when an unlock is redeemed
     UD60x18 public constant RELAYER_CUT = UD60x18.wrap(0.01e18);
 
-    Registry private constant REGISTRY = Registry(0xa7cA8732Be369CaEaE8C230537Fc8EF82a3387EE);
-    ERC721 private constant UNLOCKS = ERC721(0xb98c7e67f63d198BD96574073AD5B3427a835796);
-    address private constant TREASURY = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
-
-    function intialize() public initializer {
+    function initialize() public initializer {
         Data storage $ = _loadStorageSlot();
         $.lpToken = new LPToken(UNDERLYING.name(), UNDERLYING.symbol());
         __Ownable_init();

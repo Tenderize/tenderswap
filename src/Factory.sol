@@ -25,6 +25,8 @@ contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     event SwapDeployed(address underlying, address swap, address implementation);
     event SwapUpgraded(address underlying, address swap, address implementation);
 
+    mapping(address pool => uint256 v) public version;
+
     function initialize() public initializer {
         __Ownable_init();
         __UUPSUpgradeable_init();
@@ -35,13 +37,16 @@ contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     function deploy(ConstructorConfig memory cfg) external onlyOwner returns (address proxy, address implementation) {
+        uint256 v = 1;
         // Deploy the implementation
-        implementation = address(new TenderSwap(cfg));
+        implementation = address(new TenderSwap{ salt: bytes32(v) }(cfg));
         // deploy the contract
-        proxy = address(new ERC1967Proxy(implementation, abi.encodeWithSelector(TenderSwap.initialize.selector)));
+        proxy = address(
+            new ERC1967Proxy{ salt: bytes32("tenderswap") }(implementation, abi.encodeWithSelector(TenderSwap.initialize.selector))
+        );
 
         TenderSwap(proxy).transferOwnership(owner());
-
+        version[proxy] = v;
         emit SwapDeployed(address(cfg.UNDERLYING), proxy, implementation);
     }
 
@@ -50,7 +55,9 @@ contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
             revert("SwapFactory: UNDERLYING_MISMATCH");
         }
 
-        implementation = address(new TenderSwap(cfg));
+        uint256 v = ++version[swapProxy];
+
+        implementation = address(new TenderSwap{ salt: bytes32(v) }(cfg));
 
         TenderSwap(swapProxy).upgradeTo(implementation);
     }

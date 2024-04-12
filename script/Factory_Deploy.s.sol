@@ -7,19 +7,21 @@ import { ERC1967Proxy } from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.
 
 address constant FACTORY = address(0);
 
+uint256 constant VERSION = 1;
+
 contract Swap_Deploy is Script {
     // Contracts are deployed deterministically.
     // e.g. `foo = new Foo{salt: salt}(constructorArgs)`
     // The presence of the salt argument tells forge to use https://github.com/Arachnid/deterministic-deployment-proxy
-    bytes32 private constant salt = 0x0;
+    bytes32 constant SALT = bytes32(VERSION);
 
     // Start broadcasting with private key from `.env` file
     uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        address fac = address(new SwapFactory());
-        address proxy = address(new ERC1967Proxy(fac, abi.encodeWithSelector(SwapFactory.initialize.selector)));
+        address fac = address(new SwapFactory{ salt: SALT }());
+        address proxy = address(new ERC1967Proxy{ salt: SALT }(fac, abi.encodeWithSelector(SwapFactory.initialize.selector)));
         console2.log("SwapFactory deployed at: ", proxy);
         console2.log("Implementation deployed at: ", fac);
         vm.stopBroadcast();

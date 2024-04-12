@@ -26,7 +26,8 @@ contract Swap_Deploy is Script {
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        (address proxy, address implementation) = SwapFactory(FACTORY).deploy(cfg);
+        address implementation = address(new TenderSwap{ salt: bytes32(uint256(1)) }(cfg));
+        (address proxy) = SwapFactory(FACTORY).deploy(implementation);
         console2.log("Deployment for ", underlying);
         console2.log("TenderSwap deployed at: ", proxy);
         console2.log("Implementation deployed at: ", implementation);

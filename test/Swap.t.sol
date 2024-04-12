@@ -278,7 +278,7 @@ contract TenderSwapTest is Test {
         (uint256 out, uint256 fee) = swap.swap(address(tToken0), amount, 0);
         console.log("out %s", out);
         console.log("fee %s", fee);
-        // just assert the call doesnt fail for now
+        assertTrue(fee <= out);
     }
 
     function testFuzz_swap_multiple(uint256 liquidity) public {

@@ -58,6 +58,10 @@ Deployments and upgrades can through the `SwapFactory` contract for indexing pur
 
 TenderSwap can also be deployed standlone following the same pattern as the `SwapFactory` contract.
 
+`Factory::deploy` requires an implementation address. Each pool will have its own implementation contract where
+`constants` or `immutables` can be specified for each pool. While this adds operational overhead and complexity for
+potential upgrades, it significantly improves the gas cost of functions that use these parameters.
+
 ### Format
 
 Format the contracts:

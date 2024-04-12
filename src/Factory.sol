@@ -11,7 +11,6 @@
 
 pragma solidity ^0.8.20;
 
-import { Owned } from "solmate/auth/Owned.sol";
 import { ERC1967Proxy } from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 
@@ -22,6 +21,8 @@ import { UUPSUpgradeable } from "openzeppelin-contracts-upgradeable/proxy/utils/
 // Used for subgraph indexing and atomic deployments
 
 contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    error UNDERLYING_MISMATCH();
+
     event SwapDeployed(address underlying, address swap, address implementation);
     event SwapUpgraded(address underlying, address swap, address implementation);
 
@@ -52,7 +53,7 @@ contract SwapFactory is Initializable, UUPSUpgradeable, OwnableUpgradeable {
 
     function upgrade(ConstructorConfig memory cfg, address swapProxy) external onlyOwner returns (address implementation) {
         if (TenderSwap(swapProxy).UNDERLYING() != cfg.UNDERLYING) {
-            revert("SwapFactory: UNDERLYING_MISMATCH");
+            revert UNDERLYING_MISMATCH();
         }
 
         uint256 v = ++version[swapProxy];

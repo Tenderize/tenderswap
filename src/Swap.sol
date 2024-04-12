@@ -9,8 +9,7 @@
 //
 // Copyright (c) Tenderize Labs Ltd
 
-import { SD59x18, ZERO as ZERO_SD59, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
-import { UD60x18, ZERO as ZERO_UD60, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
+import { UD60x18, ZERO as ZERO_UD60x18, UNIT as UNIT_60x18, ud } from "@prb/math/UD60x18.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { ERC721 } from "solmate/tokens/ERC721.sol";
 import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
@@ -47,15 +46,15 @@ error ErrorCalculateLPShares();
 
 struct ConstructorConfig {
     ERC20 UNDERLYING;
-    SD59x18 BASE_FEE;
-    SD59x18 K;
+    UD60x18 BASE_FEE;
+    UD60x18 K;
 }
 
 struct SwapParams {
-    SD59x18 u;
-    SD59x18 U;
-    SD59x18 s;
-    SD59x18 S;
+    UD60x18 u;
+    UD60x18 U;
+    UD60x18 s;
+    UD60x18 S;
 }
 
 abstract contract SwapStorage {
@@ -68,7 +67,7 @@ abstract contract SwapStorage {
         // total amount of liabilities owed to LPs
         uint256 liabilities;
         // sum of token supplies that have outstanding unlocks
-        SD59x18 S;
+        UD60x18 S;
         // Recovery amount, if `recovery` > 0 enable recovery mode
         uint256 recovery;
         // treasury share of rewards pending withdrawal
@@ -78,7 +77,7 @@ abstract contract SwapStorage {
         // amount unlocking per asset
         mapping(address asset => uint256 unlocking) unlockingForAsset;
         // last supply of a tenderizer when seen, tracked because they are rebasing tokens
-        mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
+        mapping(address asset => UD60x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 reward) relayerRewards;
     }
@@ -106,8 +105,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     event RelayerRewardsClaimed(address indexed relayer, uint256 rewards);
 
     ERC20 public immutable UNDERLYING;
-    SD59x18 public immutable BASE_FEE;
-    SD59x18 public immutable K;
+    UD60x18 public immutable BASE_FEE;
+    UD60x18 public immutable K;
 
     // Minimum cut of the fee for LPs when an unlock is bought
     UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.05e18);
@@ -131,7 +130,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         _disableInitializers();
     }
 
-    function lpToken() public view returns (ERC20) {
+    function lpToken() external view returns (ERC20) {
         Data storage $ = _loadStorageSlot();
         return ERC20($.lpToken);
     }
@@ -140,7 +139,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Amount of liabilities outstanding to liquidity providers.
      * Liabilities represent all the deposits from liquidity providers and their earned fees.
      */
-    function liabilities() public view returns (uint256) {
+    function liabilities() external view returns (uint256) {
         Data storage $ = _loadStorageSlot();
         return $.liabilities;
     }
@@ -159,7 +158,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      */
     function utilisation() public view returns (UD60x18 r) {
         Data storage $ = _loadStorageSlot();
-        if ($.liabilities == 0) return ZERO_UD60;
+        if ($.liabilities == 0) return ZERO_UD60x18;
         r = _utilisation($.unlocking, $.liabilities);
     }
 
@@ -244,7 +243,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Claim outstanding rewards for a relayer.
      * @return relayerReward Amount of tokens claimed
      */
-    function claimRelayerRewards() public returns (uint256 relayerReward) {
+    function claimRelayerRewards() external returns (uint256 relayerReward) {
         Data storage $ = _loadStorageSlot();
 
         relayerReward = $.relayerRewards[msg.sender];
@@ -256,7 +255,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         emit RelayerRewardsClaimed(msg.sender, relayerReward);
     }
 
-    function claimTreasuryRewards() public onlyOwner returns (uint256 treasuryReward) {
+    function claimTreasuryRewards() external onlyOwner returns (uint256 treasuryReward) {
         Data storage $ = _loadStorageSlot();
 
         treasuryReward = $.treasuryRewards;
@@ -284,12 +283,12 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @return out Amount of output tokens
      * @return fee Amount of fees paid
      */
-    function quote(address asset, uint256 amount) public view returns (uint256 out, uint256 fee) {
+    function quote(address asset, uint256 amount) external view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        SD59x18 U = sd(int256($.unlocking));
-        SD59x18 u = sd(int256($.unlockingForAsset[asset]));
-        (SD59x18 s, SD59x18 S) = _checkSupply(asset);
+        UD60x18 U = ud($.unlocking);
+        UD60x18 u = ud($.unlockingForAsset[asset]);
+        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
         return _quote(amount, p);
@@ -310,10 +309,10 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         Data storage $ = _loadStorageSlot();
 
-        SD59x18 U = sd(int256($.unlocking));
-        SD59x18 u = sd(int256($.unlockingForAsset[asset]));
-        SD59x18 x = sd(int256(amount));
-        (SD59x18 s, SD59x18 S) = _checkSupply(asset);
+        UD60x18 U = ud($.unlocking);
+        UD60x18 u = ud($.unlockingForAsset[asset]);
+        UD60x18 x = ud(amount);
+        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
 
@@ -402,7 +401,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
+            $.lastSupplyForAsset[tenderizer] = ZERO_UD60x18;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -481,7 +480,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update S if unlockingForAsset is now zero
         if (ufa == 0) {
             $.S = $.S.sub($.lastSupplyForAsset[tenderizer]);
-            $.lastSupplyForAsset[tenderizer] = ZERO_SD59;
+            $.lastSupplyForAsset[tenderizer] = ZERO_UD60x18;
         }
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
@@ -506,31 +505,41 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     function _quote(uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
 
-        SD59x18 x = sd(int256(amount));
-        SD59x18 L = sd(int256($.liabilities));
-        SD59x18 nom;
-        SD59x18 denom;
+        UD60x18 x = ud((amount));
+        UD60x18 L = ud(($.liabilities));
+        UD60x18 nom;
+        UD60x18 denom;
+
+        // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
+
+        // in this formula (-k*u + U -u) can be rewritten as U-(k+1)*u
+        // if U < (k+1*u) then we must do (k+1)*u - U and subtract that from the first part of the sum in the nominator
+        // else we use the initial formula
 
         {
-            SD59x18 sumA = p.u.add(x);
+            UD60x18 sumA = p.u.add(x);
             sumA = sumA.mul(K).sub(p.U).add(p.u);
             sumA = sumA.mul(p.U.add(x).div(L).pow(K));
 
-            SD59x18 sumB = p.U.sub(p.u).sub(K.mul(p.u)).mul(p.U.div(L).pow(K));
+            UD60x18 negator = K.add(UNIT_60x18).mul(p.u);
+            if (p.U < negator) {
+                UD60x18 sumB = negator.sub(p.U).mul(p.U.div(L).pow(K));
+                nom = sumA.sub(sumB).mul(p.S.add(p.U));
+            } else {
+                UD60x18 sumB = p.U.sub(negator).mul(p.U.div(L).pow(K));
+                nom = sumA.add(sumB).mul(p.S.add(p.U));
+            }
 
-            nom = sumA.add(sumB).mul(p.S.add(p.U));
-
-            denom = K.mul(UNIT.add(K)).mul(p.s.add(p.u));
+            denom = K.mul(UNIT_60x18.add(K)).mul(p.s.add(p.u));
         }
-        SD59x18 baseFee = BASE_FEE.mul(x);
-        fee = uint256(baseFee.add(nom.div(denom)).unwrap());
+        UD60x18 baseFee = BASE_FEE.mul(x);
+        fee = baseFee.add(nom.div(denom)).unwrap();
 
         fee = fee >= amount ? amount : fee;
         unchecked {
             out = amount - fee;
         }
     }
-    // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
 
     /**
      * @notice checks if an asset is a valid tenderizer for `UNDERLYING`
@@ -570,13 +579,13 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
      * @notice Since the LSTs to be exchanged are aTokens, and thus have a rebasing supply,
      * we need to update the supplies upon a swap to correctly determine the spread of the asset.
      */
-    function _checkSupply(address tenderizer) internal view returns (SD59x18 s, SD59x18 S) {
+    function _checkSupply(address tenderizer) internal view returns (UD60x18 s, UD60x18 S) {
         Data storage $ = _loadStorageSlot();
 
         S = $.S;
 
-        s = sd(int256(Tenderizer(tenderizer).totalSupply()));
-        SD59x18 oldSupply = $.lastSupplyForAsset[tenderizer];
+        s = ud(Tenderizer(tenderizer).totalSupply());
+        UD60x18 oldSupply = $.lastSupplyForAsset[tenderizer];
 
         if (oldSupply.lt(s)) {
             S = S.add(s.sub(oldSupply));

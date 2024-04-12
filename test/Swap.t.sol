@@ -23,7 +23,6 @@ import { Tenderizer, TenderizerImmutableArgs } from "@tenderize/stake/tenderizer
 import { TenderSwap, ConstructorConfig, _encodeTokenId, _decodeTokenId } from "@tenderize/swap/Swap.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 
-import { SD59x18, ZERO, UNIT, unwrap, sd } from "@prb/math/SD59x18.sol";
 import { UD60x18, ud, UNIT as UNIT_60x18 } from "@prb/math/UD60x18.sol";
 
 import { SwapHarness } from "./Swap.harness.sol";
@@ -74,7 +73,7 @@ contract TenderSwapTest is Test {
             address(tToken1), abi.encodeWithSelector(TenderizerImmutableArgs.asset.selector), abi.encode(address(underlying))
         );
 
-        ConstructorConfig memory cfg = ConstructorConfig({ UNDERLYING: underlying, BASE_FEE: sd(0.0005e18), K: sd(3e18) });
+        ConstructorConfig memory cfg = ConstructorConfig({ UNDERLYING: underlying, BASE_FEE: ud(0.0005e18), K: ud(3e18) });
         swap = new SwapHarness(cfg);
         address proxy = address(new ERC1967Proxy(address(swap), ""));
         swap = SwapHarness(proxy);

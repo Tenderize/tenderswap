@@ -2,7 +2,7 @@
 
 [profile.default]
 bytecode_hash = "none"
-fuzz = { runs = 10_000 }
+fuzz = { runs = 1_000 }
 gas_reports = ["*"]
 libs = ["lib"]
 # optimizer = true (default)

@@ -96,7 +96,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
     event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
-    event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 amountOut);
+    event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 fee, uint256 unlockId);
     event UnlockBought(address indexed caller, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event UnlockRedeemed(address indexed relayer, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event RelayerRewardsClaimed(address indexed relayer, uint256 rewards);
@@ -336,12 +336,12 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         ERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
 
         // Handle Unlocking of assets
-        _unlock(asset, amount, fee);
+        uint256 id = _unlock(asset, amount, fee);
 
         // Transfer `out` of `to` to msg.sender
         UNDERLYING.safeTransfer(msg.sender, out);
 
-        emit Swap(msg.sender, asset, amount, out);
+        emit Swap(msg.sender, asset, amount, fee, id);
     }
 
     /**
@@ -543,7 +543,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         r = ud(U).div(ud(L));
     }
 
-    function _unlock(address asset, uint256 amount, uint256 fee) internal {
+    function _unlock(address asset, uint256 amount, uint256 fee) internal returns (uint256) {
         Data storage $ = _loadStorageSlot();
 
         Tenderizer t = Tenderizer(asset);
@@ -562,6 +562,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
                 maturity: maturity
             })
         );
+
+        return key;
     }
 
     /**

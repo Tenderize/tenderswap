@@ -31,7 +31,11 @@ import { ERC721Receiver } from "@tenderize/swap/util/ERC721Receiver.sol";
 import { LPToken } from "@tenderize/swap/LPToken.sol";
 import { UnlockQueue } from "@tenderize/swap/UnlockQueue.sol";
 
-pragma solidity 0.8.19;
+pragma solidity 0.8.20;
+
+Registry constant REGISTRY = Registry(0xa7cA8732Be369CaEaE8C230537Fc8EF82a3387EE);
+ERC721 constant UNLOCKS = ERC721(0xb98c7e67f63d198BD96574073AD5B3427a835796);
+address constant TREASURY = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
 
 error ErrorNotMature(uint256 maturity, uint256 timestamp);
 error ErrorAlreadyMature(uint256 maturity, uint256 timestamp);
@@ -40,18 +44,11 @@ error ErrorSlippage(uint256 out, uint256 minOut);
 error ErrorInsufficientAssets(uint256 requested, uint256 available);
 error ErrorRecoveryMode();
 error ErrorCalculateLPShares();
-error ErrorWithdrawCooldown(uint256 lpSharesRequested, uint256 lpSharesAvailable);
 
-SD59x18 constant BASE_FEE = SD59x18.wrap(0.0005e18);
-UD60x18 constant RELAYER_CUT = UD60x18.wrap(0.1e18);
-UD60x18 constant MIN_LP_CUT = UD60x18.wrap(0.1e18);
-SD59x18 constant K = SD59x18.wrap(3e18);
-uint64 constant COOLDOWN = 12 hours;
-
-struct Config {
-    ERC20 underlying;
-    address registry;
-    address unlocks;
+struct ConstructorConfig {
+    ERC20 UNDERLYING;
+    SD59x18 BASE_FEE;
+    SD59x18 K;
 }
 
 struct SwapParams {
@@ -61,33 +58,29 @@ struct SwapParams {
     SD59x18 S;
 }
 
-struct LastDeposit {
-    uint192 amount;
-    uint64 timestamp;
-}
-
 abstract contract SwapStorage {
     uint256 private constant SSLOT = uint256(keccak256("xyz.tenderize.swap.storage.location")) - 1;
 
     struct Data {
+        LPToken lpToken;
         // total amount unlocking
         uint256 unlocking;
         // total amount of liabilities owed to LPs
         uint256 liabilities;
         // sum of token supplies that have outstanding unlocks
         SD59x18 S;
-        // Unlock queue to hold unlocks
-        UnlockQueue.Data unlockQ;
         // Recovery amount, if `recovery` > 0 enable recovery mode
         uint256 recovery;
+        // treasury share of rewards pending withdrawal
+        uint256 treasuryRewards;
+        // Unlock queue to hold unlocks
+        UnlockQueue.Data unlockQ;
         // amount unlocking per asset
         mapping(address asset => uint256 unlocking) unlockingForAsset;
         // last supply of a tenderizer when seen, tracked because they are rebasing tokens
         mapping(address asset => SD59x18 lastSupply) lastSupplyForAsset;
         // relayer fees
         mapping(address relayer => uint256 reward) relayerRewards;
-        // last deposits (used to check cooldown)
-        mapping(address => LastDeposit) lastDeposit;
     }
 
     function _loadStorageSlot() internal pure returns (Data storage $) {
@@ -107,34 +100,40 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
     event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
-    event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 amountOut);
+    event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 fee, uint256 unlockId);
     event UnlockBought(address indexed caller, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event UnlockRedeemed(address indexed relayer, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event RelayerRewardsClaimed(address indexed relayer, uint256 rewards);
 
-    LPToken public immutable lpToken;
-    ERC20 private immutable underlying;
-    address private immutable registry;
-    address private immutable unlocks;
+    ERC20 public immutable UNDERLYING;
+    SD59x18 public immutable BASE_FEE;
+    SD59x18 public immutable K;
 
-    function intialize() public initializer {
+    // Minimum cut of the fee for LPs when an unlock is bought
+    UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.05e18);
+    // Cut of the fee for the treasury when an unlock is bought or redeemed
+    UD60x18 public constant TREASURY_CUT = UD60x18.wrap(0.01e18);
+    // Cut of the fee for the relayer when an unlock is redeemed
+    UD60x18 public constant RELAYER_CUT = UD60x18.wrap(0.01e18);
+
+    function initialize() public initializer {
+        Data storage $ = _loadStorageSlot();
+        $.lpToken = new LPToken(UNDERLYING.name(), UNDERLYING.symbol());
         __Ownable_init();
         __UUPSUpgradeable_init();
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor(Config memory config) {
-        lpToken = new LPToken(config.underlying.name(), config.underlying.symbol());
-        underlying = config.underlying;
-        registry = config.registry;
-        unlocks = config.unlocks;
+    constructor(ConstructorConfig memory config) {
+        UNDERLYING = config.UNDERLYING;
+        BASE_FEE = config.BASE_FEE;
+        K = config.K;
         _disableInitializers();
     }
 
-    modifier supplyUpdateHook(address asset) {
+    function lpToken() public view returns (ERC20) {
         Data storage $ = _loadStorageSlot();
-        // _supplyUpdateHook(asset);
-        _;
+        return ERC20($.lpToken);
     }
 
     /**
@@ -194,23 +193,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     function deposit(uint256 amount, uint256 minLpShares) external returns (uint256 lpShares) {
         Data storage $ = _loadStorageSlot();
 
-        // if there is an existing deposit cooldown we want to do a linear regression of the current amount and remaining time
-        LastDeposit storage ld = $.lastDeposit[msg.sender];
-        if (ld.timestamp > 0) {
-            uint256 timePassed = block.timestamp - ld.timestamp;
-            if (timePassed < COOLDOWN) {
-                uint256 remaining = COOLDOWN - timePassed;
-                uint256 newAmount = FixedPointMathLib.mulDivUp(ld.amount, remaining, COOLDOWN);
-                ld.amount += SafeCastLib.safeCastTo192(newAmount);
-                ld.timestamp = uint64(block.timestamp);
-            }
-        } else {
-            ld.timestamp = uint64(block.timestamp);
-            ld.amount = SafeCastLib.safeCastTo192(amount);
-        }
-
         // Transfer tokens to the pool
-        underlying.safeTransferFrom(msg.sender, address(this), amount);
+        UNDERLYING.safeTransferFrom(msg.sender, address(this), amount);
 
         // Calculate LP tokens to mint
         lpShares = _calculateLpShares(amount);
@@ -220,7 +204,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         $.liabilities += amount;
 
         // Mint LP tokens to the caller
-        lpToken.mint(msg.sender, lpShares);
+        $.lpToken.mint(msg.sender, lpShares);
 
         emit Deposit(msg.sender, amount, lpShares);
     }
@@ -240,34 +224,18 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         if (amount > available) revert ErrorInsufficientAssets(amount, available);
 
-        // If there is an existing cooldown since deposit want to check if the cooldown has passed
-        // If not we want to calculate the linear regrassion of the remaining amount and time
-        // and convert it into LP shares to subtract from the available LP shares for the user
-        uint256 availableLpShares = lpToken.balanceOf(msg.sender);
-        LastDeposit storage ld = $.lastDeposit[msg.sender];
-        if (ld.timestamp > 0) {
-            uint256 timePassed = block.timestamp - ld.timestamp;
-            if (timePassed < COOLDOWN) {
-                uint256 remaining = COOLDOWN - timePassed;
-                uint256 cdAmount = FixedPointMathLib.mulDivUp(ld.amount, remaining, COOLDOWN);
-                uint256 cdLpShares = _calculateLpShares(cdAmount);
-                availableLpShares -= cdLpShares;
-            }
-        }
-
         // Calculate LP tokens to burn
         uint256 lpShares = _calculateLpShares(amount);
-        if (lpShares > availableLpShares) revert ErrorWithdrawCooldown(lpShares, availableLpShares);
         if (lpShares > maxLpSharesBurnt) revert ErrorSlippage(lpShares, maxLpSharesBurnt);
 
         // Update liabilities
         $.liabilities -= amount;
 
         // Burn LP tokens from the caller
-        lpToken.burn(msg.sender, lpShares);
+        $.lpToken.burn(msg.sender, lpShares);
 
         // Transfer tokens to caller
-        underlying.safeTransfer(msg.sender, amount);
+        UNDERLYING.safeTransfer(msg.sender, amount);
 
         emit Withdraw(msg.sender, amount, lpShares);
     }
@@ -283,9 +251,19 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         delete $.relayerRewards[msg.sender];
 
-        underlying.safeTransfer(msg.sender, relayerReward);
+        UNDERLYING.safeTransfer(msg.sender, relayerReward);
 
         emit RelayerRewardsClaimed(msg.sender, relayerReward);
+    }
+
+    function claimTreasuryRewards() public onlyOwner returns (uint256 treasuryReward) {
+        Data storage $ = _loadStorageSlot();
+
+        treasuryReward = $.treasuryRewards;
+
+        $.treasuryRewards = 0;
+
+        UNDERLYING.safeTransfer(TREASURY, treasuryReward);
     }
 
     /**
@@ -358,12 +336,12 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         ERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
 
         // Handle Unlocking of assets
-        _unlock(asset, amount, fee);
+        uint256 id = _unlock(asset, amount, fee);
 
         // Transfer `out` of `to` to msg.sender
-        underlying.safeTransfer(msg.sender, out);
+        UNDERLYING.safeTransfer(msg.sender, out);
 
-        emit Swap(msg.sender, asset, amount, out);
+        emit Swap(msg.sender, asset, amount, fee, id);
     }
 
     /**
@@ -393,20 +371,32 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         if (unlock.maturity <= time) revert ErrorAlreadyMature(unlock.maturity, block.timestamp);
 
         // Calculate the reward for purchasing the unlock
-        // The base reward is the fee minus the MIN_LP_CUT going to liquidity providers
+        // The base reward is the fee minus the MIN_LP_CUT going to liquidity providers and minus the TREASURY_CUT going to the
+        // treasury
         // The base reward then further decays as time to maturity decreases
         uint256 reward;
+        uint256 lpCut;
+        uint256 treasuryCut;
         {
-            UD60x18 progress = ud(unlock.maturity - time).div(ud(adapter.unlockTime()));
             UD60x18 fee60x18 = ud(unlock.fee);
-            reward = fee60x18.sub(fee60x18.mul(MIN_LP_CUT)).mul(UNIT_60x18.sub(progress)).unwrap();
+            lpCut = fee60x18.mul(MIN_LP_CUT).unwrap();
+            treasuryCut = fee60x18.mul(TREASURY_CUT).unwrap();
+            uint256 baseReward = unlock.fee - lpCut - treasuryCut;
+            UD60x18 progress = ud(unlock.maturity - time).div(ud(adapter.unlockTime()));
+            reward = ud(baseReward).mul(UNIT_60x18.sub(progress)).unwrap();
+            // Adjust lpCut by the remaining amount after subtracting the reward
+            // This step seems to adjust lpCut to balance out the distribution
+            // Assuming the final lpCut should encompass any unallocated fee portions
+            lpCut += baseReward - reward;
         }
 
         // Update pool state
         // - update unlocking
         $.unlocking -= unlock.amount;
         // - Update liabilities to distribute LP rewards
-        $.liabilities += unlock.fee - reward;
+        $.liabilities += lpCut;
+        // - Update treasury rewards
+        $.treasuryRewards += treasuryCut;
 
         uint256 ufa = $.unlockingForAsset[tenderizer] - unlock.amount;
         // - Update S if unlockingForAsset is now zero
@@ -418,12 +408,13 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         $.unlockingForAsset[tenderizer] = ufa;
 
         // transfer unlock amount minus reward from caller to pool
-        underlying.safeTransferFrom(msg.sender, address(this), unlock.amount - reward);
+        // the reward is the discount paid. 'reward < unlock.fee' always.
+        UNDERLYING.safeTransferFrom(msg.sender, address(this), unlock.amount - reward);
 
         // transfer unlock to caller
-        ERC721(unlocks).safeTransferFrom(address(this), msg.sender, tokenId);
+        UNLOCKS.safeTransferFrom(address(this), msg.sender, tokenId);
 
-        emit UnlockBought(msg.sender, tokenId, unlock.amount, reward, unlock.fee - reward);
+        emit UnlockBought(msg.sender, tokenId, unlock.amount, reward, lpCut);
     }
 
     /**
@@ -443,12 +434,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // this will revert if unlock is not at maturity
         uint256 amountReceived = Tenderizer(tenderizer).withdraw(address(this), id);
 
-        //calculate the relayer reward
-        uint256 relayerReward = ud(unlock.fee).mul(RELAYER_CUT).unwrap();
-        // update relayer rewards
-        $.relayerRewards[msg.sender] += relayerReward;
-
-        uint256 fee = unlock.fee - relayerReward;
+        uint256 fee = unlock.fee;
 
         {
             uint256 recovery = $.recovery;
@@ -500,10 +486,21 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // - Update unlockingForAsset
         $.unlockingForAsset[tenderizer] = ufa;
 
-        // - Update liabilities to distribute LP rewards
-        $.liabilities += fee;
+        //calculate the relayer reward
+        uint256 relayerReward = ud(unlock.fee).mul(RELAYER_CUT).unwrap();
+        // update relayer rewards
+        $.relayerRewards[msg.sender] += relayerReward;
 
-        emit UnlockRedeemed(msg.sender, unlock.id, amountReceived, relayerReward, fee);
+        // - Update liabilities to distribute LP rewards
+        uint256 lpReward;
+        if (fee > 0) {
+            uint256 treasuryCut = ud(fee).mul(TREASURY_CUT).unwrap();
+            $.treasuryRewards += treasuryCut;
+            lpReward = fee - treasuryCut - relayerReward;
+            $.liabilities += lpReward;
+        }
+
+        emit UnlockRedeemed(msg.sender, unlock.id, amountReceived, relayerReward, lpReward);
     }
 
     function _quote(uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
@@ -536,17 +533,17 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
 
     /**
-     * @notice checks if an asset is a valid tenderizer for `underlying`
+     * @notice checks if an asset is a valid tenderizer for `UNDERLYING`
      */
     function _isValidAsset(address asset) internal view returns (bool) {
-        return Registry(registry).isTenderizer(asset) && Tenderizer(asset).asset() == address(underlying);
+        return REGISTRY.isTenderizer(asset) && Tenderizer(asset).asset() == address(UNDERLYING);
     }
 
-    function _utilisation(uint256 unlocking, uint256 liabilities) internal pure returns (UD60x18 r) {
-        r = ud(unlocking).div(ud(liabilities));
+    function _utilisation(uint256 U, uint256 L) internal pure returns (UD60x18 r) {
+        r = ud(U).div(ud(L));
     }
 
-    function _unlock(address asset, uint256 amount, uint256 fee) internal {
+    function _unlock(address asset, uint256 amount, uint256 fee) internal returns (uint256) {
         Data storage $ = _loadStorageSlot();
 
         Tenderizer t = Tenderizer(asset);
@@ -565,6 +562,8 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
                 maturity: maturity
             })
         );
+
+        return key;
     }
 
     /**
@@ -592,14 +591,14 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     function _calculateLpShares(uint256 amount) internal view returns (uint256 shares) {
         Data storage $ = _loadStorageSlot();
 
-        uint256 supply = lpToken.totalSupply();
-        uint256 liabilities = $.liabilities;
+        uint256 supply = $.lpToken.totalSupply();
+        uint256 L = $.liabilities;
 
-        if (liabilities == 0) {
+        if (L == 0) {
             return amount * 1e18;
         }
 
-        shares = amount * (supply / liabilities); // calculate factor first since it's scaled up
+        shares = amount * (supply / L); // calculate factor first since it's scaled up
         if (shares == 0) {
             revert ErrorCalculateLPShares();
         }

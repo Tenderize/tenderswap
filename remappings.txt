@@ -7,4 +7,4 @@ solmate/=lib/solmate/src/
 @tenderize/stake/=lib/staking/src/
 test/=test/
 openzeppelin-contracts-upgradeable/=lib/staking/lib/openzeppelin-contracts-upgradeable/contracts/
-openzeppelin-contracts/=lib/staking/lib/openzeppelin-contracts/contracts/
+openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/

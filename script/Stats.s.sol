@@ -3,7 +3,7 @@ pragma solidity ^0.8.17;
 
 import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
-import { TenderSwap, Config } from "@tenderize/swap/Swap.sol";
+import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 import { UD60x18 } from "@prb/math/UD60x18.sol";
 import { Tenderizer } from "@tenderize/stake/tenderizer/Tenderizer.sol";
 import { StakingXYZ } from "lib/staking/test/helpers/StakingXYZ.sol";

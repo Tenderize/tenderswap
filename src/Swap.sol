@@ -513,7 +513,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
 
         // in this formula (-k*u + U -u) can be rewritten as U-(k+1)*u
-        // if U < (k+1*u) then we must do (k+1)*u - U and subtract that from the first part of the sum in the nominator
+        // if U < (k+1)*u then we must do (k+1)*u - U and subtract that from the first part of the sum in the nominator
         // else we use the initial formula
 
         {

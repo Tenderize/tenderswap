@@ -5,7 +5,7 @@ import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
 import { SwapFactory } from "@tenderize/swap/Factory.sol";
-import { SD59x18 } from "@prb/math/SD59x18.sol";
+import { UD60x18 } from "@prb/math/UD60x18.sol";
 import { ERC1967Proxy } from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 address constant FACTORY = address(0);
@@ -19,14 +19,15 @@ contract Swap_Deploy is Script {
     // Start broadcasting with private key from `.env` file
     uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
     address underlying = vm.envAddress("UNDERLYING");
-    SD59x18 BASE_FEE = SD59x18.wrap(vm.envInt("BASE_FEE"));
-    SD59x18 K = SD59x18.wrap(vm.envInt("K"));
+    UD60x18 BASE_FEE = UD60x18.wrap(vm.envUint("BASE_FEE"));
+    UD60x18 K = UD60x18.wrap(vm.envUint("K"));
 
     ConstructorConfig cfg = ConstructorConfig({ UNDERLYING: ERC20(underlying), BASE_FEE: BASE_FEE, K: K });
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        (address proxy, address implementation) = SwapFactory(FACTORY).deploy(cfg);
+        address implementation = address(new TenderSwap{ salt: bytes32(uint256(1)) }(cfg));
+        (address proxy) = SwapFactory(FACTORY).deploy(implementation);
         console2.log("Deployment for ", underlying);
         console2.log("TenderSwap deployed at: ", proxy);
         console2.log("Implementation deployed at: ", implementation);

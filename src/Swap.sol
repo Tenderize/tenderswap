@@ -517,17 +517,26 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
         // else we use the initial formula
 
         {
-            UD60x18 sumA = p.u.add(x);
-            sumA = sumA.mul(K).sub(p.U).add(p.u);
-            sumA = sumA.mul(p.U.add(x).div(L).pow(K));
+            UD60x18 sumA = p.u.add(x).mul(K).add(p.u);
+            UD60x18 negatorB = K.add(UNIT_60x18).mul(p.u);
 
-            UD60x18 negator = K.add(UNIT_60x18).mul(p.u);
-            if (p.U < negator) {
-                UD60x18 sumB = negator.sub(p.U).mul(p.U.div(L).pow(K));
-                nom = sumA.sub(sumB).mul(p.S.add(p.U));
+            if (sumA < p.U) {
+                sumA = p.U.sub(sumA).mul(p.U.add(x).div(L).pow(K));
+                // we must subtract sumA from sumB
+                // we know sumB must always be positive so we
+                // can proceed with the regular calculation
+                UD60x18 sumB = p.U.sub(negatorB).mul(p.U.div(L).pow(K));
+                nom = sumB.sub(sumA).mul(p.S.add(p.U));
             } else {
-                UD60x18 sumB = p.U.sub(negator).mul(p.U.div(L).pow(K));
-                nom = sumA.add(sumB).mul(p.S.add(p.U));
+                // sumA is positive, sumB can be positive or negative
+                sumA = sumA.sub(p.U).mul(p.U.add(x).div(L).pow(K));
+                if (p.U < negatorB) {
+                    UD60x18 sumB = negatorB.sub(p.U).mul(p.U.div(L).pow(K));
+                    nom = sumA.sub(sumB).mul(p.S.add(p.U));
+                } else {
+                    UD60x18 sumB = p.U.sub(negatorB).mul(p.U.div(L).pow(K));
+                    nom = sumA.add(sumB).mul(p.S.add(p.U));
+                }
             }
 
             denom = K.mul(UNIT_60x18.add(K)).mul(p.s.add(p.u));

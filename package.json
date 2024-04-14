@@ -12,7 +12,7 @@
   },
   "private": true,
   "scripts": {
-    "clean": "rm -rf cache out",
+    "clean": "rm -rf cache out broadcast",
     "lint": "yarn lint:sol && yarn prettier:write",
     "lint:sol": "forge fmt && yarn solhint src/**/*.sol",
     "prettier:check": "prettier --check **/*.{json,md,yml} --ignore-path=.prettierignore",

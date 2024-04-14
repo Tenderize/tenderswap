@@ -109,11 +109,11 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     UD60x18 public immutable K;
 
     // Minimum cut of the fee for LPs when an unlock is bought
-    UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.05e18);
+    UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.1e18); // 10%
     // Cut of the fee for the treasury when an unlock is bought or redeemed
-    UD60x18 public constant TREASURY_CUT = UD60x18.wrap(0.01e18);
+    UD60x18 public constant TREASURY_CUT = UD60x18.wrap(0.1e18); // 10%
     // Cut of the fee for the relayer when an unlock is redeemed
-    UD60x18 public constant RELAYER_CUT = UD60x18.wrap(0.01e18);
+    UD60x18 public constant RELAYER_CUT = UD60x18.wrap(0.025e18); // 2.5%
 
     function initialize() public initializer {
         Data storage $ = _loadStorageSlot();
@@ -504,46 +504,51 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
     function _quote(uint256 amount, SwapParams memory p) internal view returns (uint256 out, uint256 fee) {
         Data storage $ = _loadStorageSlot();
+        UD60x18 x = ud(amount);
+        UD60x18 nom = _calculateNominator(x, p, $);
+        UD60x18 denom = _calculateDenominator(p);
 
-        UD60x18 x = ud((amount));
-        UD60x18 L = ud(($.liabilities));
-        UD60x18 nom;
-        UD60x18 denom;
-
-        // (((u + x)*k - U + u)*((U + x)/L)**k + (-k*u + U - u)*(U/L)**k)*(S + U)/(k*(1 + k)*(s + u))
-
-        // in this formula (-k*u + U -u) can be rewritten as U-(k+1)*u
-        // if U < (k+1)*u then we must do (k+1)*u - U and subtract that from the first part of the sum in the nominator
-        // else we use the initial formula
-
-        {
-            UD60x18 sumA = p.u.add(x);
-            sumA = sumA.mul(K).sub(p.U).add(p.u);
-            sumA = sumA.mul(p.U.add(x).div(L).pow(K));
-
-            UD60x18 negator = K.add(UNIT_60x18).mul(p.u);
-            if (p.U < negator) {
-                UD60x18 sumB = negator.sub(p.U).mul(p.U.div(L).pow(K));
-                nom = sumA.sub(sumB).mul(p.S.add(p.U));
-            } else {
-                UD60x18 sumB = p.U.sub(negator).mul(p.U.div(L).pow(K));
-                nom = sumA.add(sumB).mul(p.S.add(p.U));
-            }
-
-            denom = K.mul(UNIT_60x18.add(K)).mul(p.s.add(p.u));
-        }
-        UD60x18 baseFee = BASE_FEE.mul(x);
-        fee = baseFee.add(nom.div(denom)).unwrap();
-
+        fee = BASE_FEE.mul(x).add(nom.div(denom)).unwrap();
         fee = fee >= amount ? amount : fee;
         unchecked {
             out = amount - fee;
         }
     }
 
+    function _calculateNominator(UD60x18 x, SwapParams memory p, Data storage $) internal view returns (UD60x18 nom) {
+        UD60x18 L = ud($.liabilities);
+        UD60x18 sumA = p.u.add(x).mul(K).add(p.u);
+        UD60x18 negatorB = K.add(UNIT_60x18).mul(p.u);
+        UD60x18 util = p.U.div(L).pow(K);
+        UD60x18 util_change = p.U.add(x).div(L).pow(K);
+
+        if (sumA < p.U) {
+            sumA = p.U.sub(sumA).mul(util_change);
+            // we must subtract sumA from sumB
+            // we know sumB must always be positive so we
+            // can proceed with the regular calculation
+            UD60x18 sumB = p.U.sub(negatorB).mul(util);
+            nom = sumB.sub(sumA).mul(p.S.add(p.U));
+        } else {
+            // sumA is positive, sumB can be positive or negative
+            sumA = sumA.sub(p.U).mul(util_change);
+            if (p.U < negatorB) {
+                UD60x18 sumB = negatorB.sub(p.U).mul(util);
+                nom = sumA.sub(sumB).mul(p.S.add(p.U));
+            } else {
+                UD60x18 sumB = p.U.sub(negatorB).mul(util);
+                nom = sumA.add(sumB).mul(p.S.add(p.U));
+            }
+        }
+    }
+
+    function _calculateDenominator(SwapParams memory p) internal view returns (UD60x18) {
+        return K.mul(UNIT_60x18.add(K)).mul(p.s.add(p.u));
+    }
     /**
      * @notice checks if an asset is a valid tenderizer for `UNDERLYING`
      */
+
     function _isValidAsset(address asset) internal view returns (bool) {
         return REGISTRY.isTenderizer(asset) && Tenderizer(asset).asset() == address(UNDERLYING);
     }

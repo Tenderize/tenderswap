@@ -11,7 +11,7 @@ import { ERC1967Proxy } from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.
 // TENDERIZE POOLS BASE FEE = 0.025% with K=4
 // EXOTIC POOLS BASE FEE = 0.1% with K=4
 
-address constant FACTORY = address(0);
+address constant FACTORY = 0xcB78EbD81D08df037973Afd70D7FeF7b6b0C6B06;
 
 contract Swap_Deploy is Script {
     // Contracts are deployed deterministically.
@@ -34,7 +34,9 @@ contract Swap_Deploy is Script {
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
-        address implementation = address(new TenderSwap{ salt: bytes32(uint256(1)) }(cfg));
+        uint256 v = 1;
+        address implementation = 0xFF343ba942310c099D1e427e946C9eBDC999d27C; // address(new TenderSwap{ salt: bytes32(uint256(v))
+            // }(cfg));
         (address proxy) = SwapFactory(FACTORY).deploy(implementation);
         console2.log("Deployment for ", underlying);
         console2.log("TenderSwap deployed at: ", proxy);

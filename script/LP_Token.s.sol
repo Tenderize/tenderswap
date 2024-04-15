@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;
-
+// Matic Swap: 0x422BEF50e75098c3337790627689fF1aAA06C057
+// Grt Swap: 0x7ee73bCa91f833C4E06BDC5F0e9f9aB7Ed9dB67d
+// Lpt swap: 0x686962481543d543934903C3FE8bDe8c5dB9Bd97
 import { Script, console2 } from "forge-std/Script.sol";
 import { ERC20 } from "solmate/tokens/ERC20.sol";
-import { TenderSwap, ConstructorConfig } from "@tenderize/swap/Swap.sol";
+import { TenderSwap } from "@tenderize/swap/Swap.sol";
 
 contract Add_Liquidity is Script {
     // Contracts are deployed deterministically.
@@ -13,15 +13,14 @@ contract Add_Liquidity is Script {
 
     // Start broadcasting with private key from `.env` file
     uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-    address underlying = vm.envAddress("UNDERLYING");
-    uint256 amount = vm.envUint("AMOUNT");
-    address swap = vm.envAddress("SWAP");
+
+    address swap = 0x686962481543d543934903C3FE8bDe8c5dB9Bd97;
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);
         TenderSwap swap = TenderSwap(swap);
-        ERC20(underlying).approve(address(swap), amount);
-        swap.deposit(amount, 0);
+        address lpToken = address(swap.lpToken());
+        console2.log("Lp Token :", lpToken);
 
         // ERC20(0x2eaC4210B90D13666f7E88635096BdC17C51FB70).approve(address(swap), 10 ether);
 

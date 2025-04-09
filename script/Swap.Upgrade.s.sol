@@ -10,7 +10,7 @@ address constant GRT = 0x9623063377AD1B27544C965cCd7342f7EA7e88C7;
 
 contract SwapUpgrade is Script {
     uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-    bytes32 private constant salt = bytes32(uint256(1));
+    bytes32 private constant salt = bytes32(uint256(2));
 
     function run() public {
         vm.startBroadcast(deployerPrivateKey);

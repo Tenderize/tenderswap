@@ -281,7 +281,48 @@ contract TenderSwapTest is Test {
         assertTrue(fee <= out);
     }
 
-    function testFuzz_swap_multiple(uint256 liquidity) public {
+    function testFuzz_quote_swap_multiple(uint256 liquidity) public {
+        liquidity = bound(liquidity, 1e18, type(uint128).max);
+        underlying.mint(address(this), liquidity);
+        underlying.approve(address(swap), liquidity);
+        swap.deposit(liquidity, 0);
+
+        uint256 amount_1 = bound(liquidity, 1e9, liquidity - 1e9);
+        uint256 amount_2 = bound(liquidity, 1e9, liquidity - amount_1);
+
+        console.log("Swap amount %s", amount_1 + amount_2);
+
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlock.selector, amount_1), abi.encode(0));
+        vm.mockCall(address(tToken0), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 0), abi.encode(block.number + 100));
+        vm.mockCall(address(tToken1), abi.encodeWithSelector(Tenderizer.unlock.selector, amount_2), abi.encode(1));
+        vm.mockCall(address(tToken1), abi.encodeWithSelector(Tenderizer.unlockMaturity.selector, 1), abi.encode(block.number + 101));
+
+        tToken0.mint(address(this), amount_1);
+        tToken0.approve(address(swap), amount_1);
+        tToken1.mint(address(this), amount_2);
+        tToken1.approve(address(swap), amount_2);
+
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(tToken0);
+        tokens[1] = address(tToken1);
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = amount_1;
+        amounts[1] = amount_2;
+
+        (uint256 out, uint256 fee) = swap.quoteMultiple(tokens, amounts);
+
+        console.log("quote out %s", out);
+        console.log("quote fee %s", fee);
+        assertTrue(fee <= out);
+        assertTrue(out < amount_1 + amount_2);
+
+        (out, fee) = swap.swapMultiple(TenderSwap.SwapMultipleArgs({ assets: tokens, amounts: amounts, minOut: out }));
+        console.log("out %s", out);
+        console.log("fee %s", fee);
+        assertTrue(out < amount_1 + amount_2);
+    }
+
+    function testFuzz_swap_multiple_sequential(uint256 liquidity) public {
         liquidity = bound(liquidity, 10e18, type(uint128).max);
         underlying.mint(address(this), liquidity);
         underlying.approve(address(swap), liquidity);

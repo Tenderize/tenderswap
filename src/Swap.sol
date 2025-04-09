@@ -34,7 +34,7 @@ pragma solidity 0.8.20;
 
 Registry constant REGISTRY = Registry(0xa7cA8732Be369CaEaE8C230537Fc8EF82a3387EE);
 ERC721 constant UNLOCKS = ERC721(0xb98c7e67f63d198BD96574073AD5B3427a835796);
-address constant TREASURY = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
+address constant TREASURY = 0xc1cFab553835D74717c4499793EEa6Ef198A3031;
 
 error ErrorNotMature(uint256 maturity, uint256 timestamp);
 error ErrorAlreadyMature(uint256 maturity, uint256 timestamp);
@@ -100,6 +100,7 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     event Deposit(address indexed from, uint256 amount, uint256 lpSharesMinted);
     event Withdraw(address indexed to, uint256 amount, uint256 lpSharesBurnt);
     event Swap(address indexed caller, address indexed asset, uint256 amountIn, uint256 fee, uint256 unlockId);
+    event SwapMultiple(address indexed caller, address[] assets, uint256[] amountsIn, uint256 fee, uint256[] unlockIds);
     event UnlockBought(address indexed caller, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event UnlockRedeemed(address indexed relayer, uint256 tokenId, uint256 amount, uint256 reward, uint256 lpFees);
     event RelayerRewardsClaimed(address indexed relayer, uint256 rewards);
@@ -109,9 +110,9 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
     UD60x18 public immutable K;
 
     // Minimum cut of the fee for LPs when an unlock is bought
-    UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.1e18); // 10%
+    UD60x18 public constant MIN_LP_CUT = UD60x18.wrap(0.25e18); // 25%
     // Cut of the fee for the treasury when an unlock is bought or redeemed
-    UD60x18 public constant TREASURY_CUT = UD60x18.wrap(0.1e18); // 10%
+    UD60x18 public constant TREASURY_CUT = UD60x18.wrap(0.15e18); // 15%
     // Cut of the fee for the relayer when an unlock is redeemed
     UD60x18 public constant RELAYER_CUT = UD60x18.wrap(0.025e18); // 2.5%
 
@@ -292,6 +293,88 @@ contract TenderSwap is Initializable, UUPSUpgradeable, OwnableUpgradeable, SwapS
 
         SwapParams memory p = SwapParams({ U: U, u: u, S: S, s: s });
         return _quote(amount, p);
+    }
+
+    function quoteMultiple(
+        address[] calldata assets,
+        uint256[] calldata amounts
+    )
+        external
+        view
+        returns (uint256 out, uint256 fee)
+    {
+        Data storage $ = _loadStorageSlot();
+
+        UD60x18 U = ud($.unlocking);
+
+        // TODO: Should we update S locally by subtracting it by the total amount swapped so far ?
+        UD60x18 x = ZERO_UD60x18;
+        UD60x18 _x;
+
+        for (uint256 i = 0; i < assets.length; i++) {
+            address asset = assets[i];
+            uint256 amount = amounts[i];
+
+            UD60x18 u = ud($.unlockingForAsset[asset]);
+            (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+
+            SwapParams memory p = SwapParams({ U: U, u: u, S: S - x, s: s });
+            (uint256 outAmount, uint256 feeAmount) = _quote(amount, p);
+            _x = ud(amount);
+            U = U.add(_x);
+            x = x.add(_x);
+            out += outAmount;
+            fee += feeAmount;
+        }
+    }
+
+    struct SwapMultipleArgs {
+        address[] assets;
+        uint256[] amounts;
+        uint256 minOut;
+    }
+
+    function swapMultiple(SwapMultipleArgs calldata args) external returns (uint256 out, uint256 fee) {
+        Data storage $ = _loadStorageSlot();
+
+        UD60x18 U = ud($.unlocking);
+        uint256 l = args.assets.length;
+        uint256[] memory ids = new uint256[](l);
+        for (uint256 i = 0; i < l; i++) {
+            UD60x18 x = ud(args.amounts[i]);
+            (uint256 outAmount, uint256 feeAmount, uint256 id) = _swapStep(args.assets[i], args.amounts[i], U);
+            ids[i] = id;
+            out += outAmount;
+            fee += feeAmount;
+            U = U.add(x);
+        }
+
+        $.unlocking = U.unwrap();
+
+        if (out < args.minOut) revert ErrorSlippage(out, args.minOut);
+
+        UNDERLYING.safeTransfer(msg.sender, out);
+
+        emit SwapMultiple(msg.sender, args.assets, args.amounts, fee, ids);
+    }
+
+    function _swapStep(address asset, uint256 amount, UD60x18 U) internal returns (uint256 out, uint256 fee, uint256 id) {
+        Data storage $ = _loadStorageSlot();
+
+        if (!_isValidAsset(asset)) revert ErrorInvalidAsset(asset);
+        ERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        UD60x18 u = ud($.unlockingForAsset[asset]);
+        (UD60x18 s, UD60x18 S) = _checkSupply(asset);
+
+        (out, fee) = _quote(amount, SwapParams({ U: U, u: u, S: S, s: s }));
+        id = _unlock(asset, amount, fee);
+
+        //  update for 'S', insted of update in outer call
+        $.S = S.sub(ud(amount));
+
+        // update pool state for asset
+        $.lastSupplyForAsset[asset] = s.sub(ud(amount));
+        $.unlockingForAsset[asset] += amount;
     }
 
     /**
